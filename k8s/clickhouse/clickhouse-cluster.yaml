@@ -1,0 +1,177 @@
+apiVersion: "clickhouse.altinity.com/v1"
+kind: "ClickHouseInstallation"
+metadata:
+  name: coroot-clickhouse
+  namespace: clickhouse
+spec:
+  # Configuration for the cluster
+  configuration:
+    # Cluster definition
+    clusters:
+      - name: coroot-cluster
+        layout:
+          shardsCount: 2
+          replicasCount: 2
+
+    # ZooKeeper configuration for replication
+    zookeeper:
+      nodes:
+        - host: zookeeper-0.zookeeper-headless.clickhouse.svc.cluster.local
+          port: 2181
+        - host: zookeeper-1.zookeeper-headless.clickhouse.svc.cluster.local
+          port: 2181
+        - host: zookeeper-2.zookeeper-headless.clickhouse.svc.cluster.local
+          port: 2181
+
+    # Users configuration
+    users:
+      # Default user
+      default/password: ""
+      default/networks/ip:
+        - "::/0"
+      default/profile: default
+      default/quota: default
+
+      # Coroot user
+      coroot/password_sha256_hex: "8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92"  # Password: coroot123 (CHANGE THIS!)
+      coroot/networks/ip:
+        - "::/0"
+      coroot/profile: default
+
+    # Profiles configuration
+    profiles:
+      default/max_memory_usage: "10000000000"
+      default/max_execution_time: "300"
+      default/max_concurrent_queries_for_user: "100"
+
+    # Settings
+    settings:
+      # Compression
+      compression/case/method: zstd
+
+      # Log retention
+      system_tables_lazy_load: "1"
+
+    # Files - additional configurations
+    files:
+      # Logging configuration
+      config.d/logs.xml: |
+        <clickhouse>
+          <logger>
+            <level>information</level>
+            <log>/var/log/clickhouse-server/clickhouse-server.log</log>
+            <errorlog>/var/log/clickhouse-server/clickhouse-server.err.log</errorlog>
+            <size>100M</size>
+            <count>10</count>
+          </logger>
+        </clickhouse>
+
+  # Defaults for all pods
+  defaults:
+    templates:
+      # Pod template
+      podTemplate: clickhouse-pod-template
+      # Data volume claim template
+      dataVolumeClaimTemplate: data-volume
+      # Log volume claim template
+      logVolumeClaimTemplate: log-volume
+
+  # Templates
+  templates:
+    # Pod template
+    podTemplates:
+      - name: clickhouse-pod-template
+        spec:
+          # Node affinity and tolerations
+          affinity:
+            podAntiAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchExpressions:
+                      - key: app
+                        operator: In
+                        values:
+                          - clickhouse
+                  topologyKey: kubernetes.io/hostname
+            nodeAffinity:
+              preferredDuringSchedulingIgnoredDuringExecution:
+                - weight: 100
+                  preference:
+                    matchExpressions:
+                      - key: node-type
+                        operator: In
+                        values:
+                          - storage
+
+          tolerations:
+            - key: storage
+              operator: Equal
+              value: critical
+              effect: NoSchedule
+
+          # Security context
+          securityContext:
+            runAsUser: 101
+            runAsGroup: 101
+            fsGroup: 101
+
+          # Containers
+          containers:
+            - name: clickhouse
+              image: clickhouse/clickhouse-server:24.11
+              imagePullPolicy: IfNotPresent
+
+              # Resources
+              resources:
+                requests:
+                  cpu: 2000m
+                  memory: 8Gi
+                limits:
+                  cpu: 4000m
+                  memory: 16Gi
+
+              # Volume mounts
+              volumeMounts:
+                - name: data-volume
+                  mountPath: /var/lib/clickhouse
+                - name: log-volume
+                  mountPath: /var/log/clickhouse-server
+
+              # Liveness and readiness probes
+              livenessProbe:
+                httpGet:
+                  path: /ping
+                  port: 8123
+                initialDelaySeconds: 30
+                periodSeconds: 10
+                timeoutSeconds: 5
+                failureThreshold: 3
+
+              readinessProbe:
+                httpGet:
+                  path: /ping
+                  port: 8123
+                initialDelaySeconds: 10
+                periodSeconds: 5
+                timeoutSeconds: 3
+                failureThreshold: 3
+
+    # Volume claim templates
+    volumeClaimTemplates:
+      - name: data-volume
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 500Gi
+          storageClassName: standard-rwo
+
+      - name: log-volume
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 10Gi
+          storageClassName: standard-rwo

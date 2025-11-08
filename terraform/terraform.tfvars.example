@@ -1,0 +1,20 @@
+# GCP Project Configuration
+project_id = "your-gcp-project-id"
+region     = "us-central1"
+
+# Cluster Configuration
+cluster_name = "coroot-monitoring-cluster"
+environment  = "prod"
+
+# Network Configuration
+network_name = "coroot-network"
+subnet_name  = "coroot-subnet"
+subnet_cidr  = "10.0.0.0/20"
+pods_cidr    = "10.4.0.0/14"
+services_cidr = "10.8.0.0/20"
+
+# Node Pool Configuration
+monitoring_node_count = 3
+storage_node_count    = 3
+spot_min_nodes        = 2
+spot_max_nodes        = 20

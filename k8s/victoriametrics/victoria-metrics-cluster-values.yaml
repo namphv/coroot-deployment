@@ -1,0 +1,268 @@
+# VictoriaMetrics Cluster Helm Chart Values
+# Using victoria-metrics-cluster chart from VictoriaMetrics
+
+# VMCluster configuration
+vmcluster:
+  enabled: true
+
+  # VMSelect - Query interface
+  vmselect:
+    replicaCount: 2
+
+    resources:
+      requests:
+        cpu: 1000m
+        memory: 2Gi
+      limits:
+        cpu: 2000m
+        memory: 4Gi
+
+    # Pod affinity - prefer to run on different nodes
+    affinity:
+      podAntiAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                  - key: app.kubernetes.io/name
+                    operator: In
+                    values:
+                      - vmselect
+              topologyKey: kubernetes.io/hostname
+
+    # Can run on spot nodes (stateless)
+    tolerations: []
+
+    nodeSelector: {}
+
+    # Service configuration
+    service:
+      type: ClusterIP
+      port: 8481
+
+    # Cache configuration
+    cacheMountPath: /cache
+    persistentVolume:
+      enabled: true
+      size: 10Gi
+      storageClass: standard-rwo
+
+    extraArgs:
+      # Increase select concurrency
+      search.maxConcurrentRequests: "16"
+      # Cache configuration
+      search.maxQueryDuration: "30s"
+      # Deduplication
+      dedup.minScrapeInterval: "30s"
+
+  # VMInsert - Data ingestion
+  vminsert:
+    replicaCount: 2
+
+    resources:
+      requests:
+        cpu: 1000m
+        memory: 2Gi
+      limits:
+        cpu: 2000m
+        memory: 4Gi
+
+    # Pod anti-affinity
+    affinity:
+      podAntiAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                  - key: app.kubernetes.io/name
+                    operator: In
+                    values:
+                      - vminsert
+              topologyKey: kubernetes.io/hostname
+
+    # Can run on spot nodes (stateless)
+    tolerations: []
+
+    nodeSelector: {}
+
+    # Service configuration
+    service:
+      type: ClusterIP
+      port: 8480
+
+    extraArgs:
+      # Increase max label size
+      maxLabelsPerTimeseries: "50"
+      # Memory ballast
+      memory.allowedPercent: "80"
+
+  # VMStorage - Data storage (StatefulSet)
+  vmstorage:
+    replicaCount: 3
+
+    resources:
+      requests:
+        cpu: 2000m
+        memory: 8Gi
+      limits:
+        cpu: 4000m
+        memory: 16Gi
+
+    # Storage configuration
+    persistentVolume:
+      enabled: true
+      size: 500Gi  # Adjust based on retention and data volume
+      storageClass: standard-rwo  # Use SSD for better performance
+
+    # Pod anti-affinity - ensure replicas on different nodes
+    affinity:
+      podAntiAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+                - key: app.kubernetes.io/name
+                  operator: In
+                  values:
+                    - vmstorage
+            topologyKey: kubernetes.io/hostname
+      # Node affinity - prefer storage nodes
+      nodeAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            preference:
+              matchExpressions:
+                - key: node-type
+                  operator: In
+                  values:
+                    - storage
+
+    # Tolerate storage taints
+    tolerations:
+      - key: storage
+        operator: Equal
+        value: critical
+        effect: NoSchedule
+
+    nodeSelector: {}
+
+    # Retention and storage settings
+    retentionPeriod: "30d"  # Adjust as needed (30d, 60d, 90d, etc.)
+
+    extraArgs:
+      # Deduplication interval
+      dedup.minScrapeInterval: "30s"
+      # Memory settings
+      memory.allowedPercent: "80"
+      # Storage settings
+      storage.minFreeDiskSpaceBytes: "10737418240"  # 10GB
+
+    # Init container to set proper permissions
+    initContainers:
+      - name: fix-permissions
+        image: busybox:latest
+        command:
+          - sh
+          - -c
+          - chown -R 1000:1000 /storage
+        volumeMounts:
+          - name: storage
+            mountPath: /storage
+        securityContext:
+          runAsUser: 0
+
+# VMAgent for scraping (optional - Coroot agents push directly)
+vmagent:
+  enabled: true
+  replicaCount: 1
+
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 1000m
+      memory: 2Gi
+
+  remoteWrite:
+    - url: http://vminsert-victoria-metrics-cluster:8480/insert/0/prometheus/api/v1/write
+
+  # Can run on spot nodes
+  tolerations: []
+
+  nodeSelector: {}
+
+  # Scrape configs for Kubernetes monitoring
+  config:
+    global:
+      scrape_interval: 30s
+      external_labels:
+        cluster: coroot-monitoring
+
+    scrape_configs:
+      # Scrape kube-state-metrics
+      - job_name: kube-state-metrics
+        kubernetes_sd_configs:
+          - role: service
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_label_app_kubernetes_io_name]
+            regex: kube-state-metrics
+            action: keep
+
+      # Scrape node-exporter
+      - job_name: node-exporter
+        kubernetes_sd_configs:
+          - role: endpoints
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_endpoints_name]
+            regex: node-exporter
+            action: keep
+
+# VMAlert for alerting (optional)
+vmalert:
+  enabled: false  # Enable if you want alerting
+
+# Grafana (optional - Coroot has its own UI)
+grafana:
+  enabled: false
+
+# Prometheus exporters
+prometheus-node-exporter:
+  enabled: true
+
+  # DaemonSet runs on all nodes
+  tolerations:
+    - effect: NoSchedule
+      operator: Exists
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+kube-state-metrics:
+  enabled: true
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+  # Can run on any node
+  nodeSelector: {}
+
+# Service Monitor for Prometheus Operator (if using)
+serviceMonitor:
+  enabled: false
+
+# Global settings
+global:
+  # Cluster domain
+  clusterDomainName: cluster.local

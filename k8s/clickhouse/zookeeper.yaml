@@ -1,0 +1,177 @@
+---
+# Service for ZooKeeper headless
+apiVersion: v1
+kind: Service
+metadata:
+  name: zookeeper-headless
+  namespace: clickhouse
+  labels:
+    app: zookeeper
+spec:
+  clusterIP: None
+  ports:
+    - port: 2181
+      name: client
+    - port: 2888
+      name: follower
+    - port: 3888
+      name: election
+  selector:
+    app: zookeeper
+
+---
+# Service for ZooKeeper client
+apiVersion: v1
+kind: Service
+metadata:
+  name: zookeeper
+  namespace: clickhouse
+  labels:
+    app: zookeeper
+spec:
+  type: ClusterIP
+  ports:
+    - port: 2181
+      name: client
+  selector:
+    app: zookeeper
+
+---
+# StatefulSet for ZooKeeper
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: zookeeper
+  namespace: clickhouse
+  labels:
+    app: zookeeper
+spec:
+  serviceName: zookeeper-headless
+  replicas: 3
+  selector:
+    matchLabels:
+      app: zookeeper
+
+  podManagementPolicy: Parallel
+
+  template:
+    metadata:
+      labels:
+        app: zookeeper
+    spec:
+      # Anti-affinity to spread across nodes
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - zookeeper
+              topologyKey: kubernetes.io/hostname
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: node-type
+                    operator: In
+                    values:
+                      - storage
+
+      tolerations:
+        - key: storage
+          operator: Equal
+          value: critical
+          effect: NoSchedule
+
+      containers:
+        - name: zookeeper
+          image: zookeeper:3.9
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - containerPort: 2181
+              name: client
+            - containerPort: 2888
+              name: follower
+            - containerPort: 3888
+              name: election
+
+          env:
+            - name: ZOO_MY_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: ZOO_SERVERS
+              value: "server.0=zookeeper-0.zookeeper-headless.clickhouse.svc.cluster.local:2888:3888;2181 server.1=zookeeper-1.zookeeper-headless.clickhouse.svc.cluster.local:2888:3888;2181 server.2=zookeeper-2.zookeeper-headless.clickhouse.svc.cluster.local:2888:3888;2181"
+            - name: ZOO_4LW_COMMANDS_WHITELIST
+              value: "mntr,conf,ruok,stat"
+            - name: ZOO_CFG_EXTRA
+              value: "maxClientCnxns=60 autopurge.snapRetainCount=3 autopurge.purgeInterval=1"
+            - name: ZOO_TICK_TIME
+              value: "2000"
+            - name: ZOO_INIT_LIMIT
+              value: "10"
+            - name: ZOO_SYNC_LIMIT
+              value: "5"
+            - name: ZOO_MAX_CLIENT_CNXNS
+              value: "60"
+
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: 1000m
+              memory: 2Gi
+
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: datalog
+              mountPath: /datalog
+
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - echo ruok | nc localhost 2181 | grep imok
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - echo ruok | nc localhost 2181 | grep imok
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: standard-rwo
+        resources:
+          requests:
+            storage: 20Gi
+
+    - metadata:
+        name: datalog
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: standard-rwo
+        resources:
+          requests:
+            storage: 10Gi

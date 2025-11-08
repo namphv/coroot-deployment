@@ -1,0 +1,311 @@
+# Coroot Helm Chart Values
+# Using external VictoriaMetrics and ClickHouse
+
+# Coroot configuration
+corootCE:
+  # Deployment configuration
+  replicas: 2
+
+  image:
+    repository: ghcr.io/coroot/coroot
+    tag: ""  # Use chart default (latest stable)
+    pullPolicy: IfNotPresent
+
+  # Resources
+  resources:
+    requests:
+      cpu: 2000m
+      memory: 4Gi
+    limits:
+      cpu: 4000m
+      memory: 8Gi
+
+  # Service configuration
+  service:
+    type: LoadBalancer  # Change to ClusterIP if using Ingress
+    port: 8080
+    annotations: {}
+      # For GKE internal load balancer:
+      # cloud.google.com/load-balancer-type: "Internal"
+      # For preserving client IP:
+      # service.beta.kubernetes.io/external-traffic: OnlyLocal
+
+  # Ingress configuration (alternative to LoadBalancer)
+  ingress:
+    enabled: false
+    className: nginx
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+      nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    hosts:
+      - host: coroot.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls:
+      - secretName: coroot-tls
+        hosts:
+          - coroot.example.com
+
+  # Node affinity and tolerations
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchExpressions:
+                - key: app.kubernetes.io/name
+                  operator: In
+                  values:
+                    - coroot
+            topologyKey: kubernetes.io/hostname
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          preference:
+            matchExpressions:
+              - key: node-type
+                operator: In
+                values:
+                  - monitoring
+
+  tolerations:
+    - key: monitoring
+      operator: Equal
+      value: critical
+      effect: NoSchedule
+
+  nodeSelector: {}
+
+  # Environment variables
+  env:
+    # Basic configuration
+    - name: CACHE_TTL
+      value: "30m"
+    - name: CACHE_GC_INTERVAL
+      value: "10m"
+
+  # Persistence for cache
+  persistence:
+    enabled: true
+    size: 50Gi
+    storageClass: standard-rwo
+    accessMode: ReadWriteOnce
+
+  # Security context
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    fsGroup: 1000
+
+  # Pod security context
+  podSecurityContext:
+    seccompProfile:
+      type: RuntimeDefault
+
+# External Prometheus (VictoriaMetrics)
+externalPrometheus:
+  enabled: true
+  # VMSelect endpoint for queries
+  url: http://vmselect-victoria-metrics-cluster.victoria-metrics.svc:8481/select/0/prometheus
+  # VMInsert endpoint for remote write
+  remoteWriteUrl: http://vminsert-victoria-metrics-cluster.victoria-metrics.svc:8480/insert/0/prometheus/api/v1/write
+  # Basic auth (if needed)
+  # basicAuth:
+  #   username: ""
+  #   password: ""
+  # Custom headers (if needed)
+  # customHeaders: {}
+  # TLS configuration
+  tlsConfig:
+    insecureSkipVerify: false
+
+# External ClickHouse
+externalClickhouse:
+  enabled: true
+  # ClickHouse connection details
+  protocol: http  # or https
+  host: chi-coroot-clickhouse-coroot-cluster-0-0.clickhouse.svc
+  port: 8123  # HTTP port (9000 for native)
+  database: coroot
+  user: coroot
+  # Password (use Secret for production)
+  password: coroot123  # CHANGE THIS!
+  # Or use existing secret
+  # existingSecret:
+  #   name: clickhouse-credentials
+  #   key: password
+  # TLS configuration
+  tls:
+    enabled: false
+    insecureSkipVerify: false
+
+# Embedded Prometheus (disabled - we use VictoriaMetrics)
+prometheus:
+  enabled: false
+
+# Embedded ClickHouse (disabled - we use external)
+clickhouse:
+  enabled: false
+
+# PostgreSQL for multi-instance support (optional but recommended for HA)
+postgresql:
+  enabled: true
+
+  auth:
+    username: coroot
+    password: coroot-postgres-password  # CHANGE THIS!
+    database: coroot
+
+  primary:
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+      limits:
+        cpu: 1000m
+        memory: 2Gi
+
+    persistence:
+      enabled: true
+      size: 20Gi
+      storageClass: standard-rwo
+
+    affinity:
+      nodeAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            preference:
+              matchExpressions:
+                - key: node-type
+                  operator: In
+                  values:
+                    - monitoring
+
+    tolerations:
+      - key: monitoring
+        operator: Equal
+        value: critical
+        effect: NoSchedule
+
+# Node Agent configuration
+node-agent:
+  enabled: true
+
+  # DaemonSet runs on all nodes
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+
+  image:
+    repository: ghcr.io/coroot/coroot-node-agent
+    tag: ""  # Use chart default
+    pullPolicy: IfNotPresent
+
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+
+  # Tolerations to run on all nodes including spot
+  tolerations:
+    - effect: NoSchedule
+      operator: Exists
+    - effect: NoExecute
+      operator: Exists
+
+  # Privileged mode required for eBPF
+  securityContext:
+    privileged: true
+    capabilities:
+      add:
+        - SYS_ADMIN
+        - SYS_RESOURCE
+        - SYS_PTRACE
+        - NET_ADMIN
+        - IPC_LOCK
+
+  # Environment variables
+  env:
+    # Remote write to VictoriaMetrics
+    - name: PROMETHEUS_REMOTE_WRITE_URL
+      value: http://vminsert-victoria-metrics-cluster.victoria-metrics.svc:8480/insert/0/prometheus/api/v1/write
+    # Scrape interval
+    - name: SCRAPE_INTERVAL
+      value: "15s"
+    # Additional labels
+    - name: EXTERNAL_LABELS
+      value: "cluster=coroot-monitoring"
+
+  # Host paths
+  hostPath:
+    - name: sys
+      path: /sys
+    - name: proc
+      path: /proc
+
+# Cluster Agent (for Kubernetes metadata)
+cluster-agent:
+  enabled: true
+
+  replicas: 1
+
+  image:
+    repository: ghcr.io/coroot/coroot-cluster-agent
+    tag: ""
+    pullPolicy: IfNotPresent
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 200m
+      memory: 512Mi
+
+  # Can run on any node
+  tolerations: []
+
+  nodeSelector: {}
+
+  # Environment variables
+  env:
+    # Coroot server URL
+    - name: COROOT_URL
+      value: http://coroot:8080
+    # Scrape interval
+    - name: SCRAPE_INTERVAL
+      value: "30s"
+
+# ServiceAccount
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+# RBAC
+rbac:
+  create: true
+
+# Global settings
+global:
+  # Image pull secrets (if using private registry)
+  imagePullSecrets: []
+
+# Additional configurations
+bootstrap:
+  # Bootstrap admin password (change this!)
+  adminPassword: "admin"
+  # Automatically create default project
+  createDefaultProject: true
+
+# Monitoring (self-monitoring with ServiceMonitor for Prometheus Operator)
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 10s
