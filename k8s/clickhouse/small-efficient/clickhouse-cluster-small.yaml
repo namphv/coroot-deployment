@@ -92,6 +92,48 @@ spec:
           </storage_configuration>
         </clickhouse>
 
+      # Replica priority and load balancing (route 80-90% traffic to spot node)
+      config.d/replica_priority.xml: |
+        <clickhouse>
+          <remote_servers>
+            <coroot_cluster>
+              <shard>
+                <internal_replication>true</internal_replication>
+
+                <!-- Worker replica (spot node) - HIGH PRIORITY (prefer this) -->
+                <replica>
+                  <host>chi-coroot-clickhouse-small-coroot-cluster-0-1-0.clickhouse.svc.cluster.local</host>
+                  <port>9000</port>
+                  <priority>1</priority>  <!-- Lower = higher priority -->
+                </replica>
+
+                <!-- Anchor replica (regular node) - LOW PRIORITY (fallback only) -->
+                <replica>
+                  <host>chi-coroot-clickhouse-small-coroot-cluster-0-0-0.clickhouse.svc.cluster.local</host>
+                  <port>9000</port>
+                  <priority>10</priority>  <!-- Higher = lower priority -->
+                </replica>
+              </shard>
+            </coroot_cluster>
+          </remote_servers>
+
+          <profiles>
+            <default>
+              <!-- Fallback to stale replicas only when necessary -->
+              <fallback_to_stale_replicas_for_distributed_queries>1</fallback_to_stale_replicas_for_distributed_queries>
+
+              <!-- Allow up to 5 min delay before considering replica stale -->
+              <max_replica_delay_for_distributed_queries>300</max_replica_delay_for_distributed_queries>
+
+              <!-- Use priority-based load balancing -->
+              <load_balancing>nearest_hostname</load_balancing>
+
+              <!-- Prefer worker replica (spot node) -->
+              <prefer_localhost_replica>1</prefer_localhost_replica>
+            </default>
+          </profiles>
+        </clickhouse>
+
   # Defaults for all pods
   defaults:
     templates:
