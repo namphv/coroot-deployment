@@ -1,0 +1,283 @@
+apiVersion: "clickhouse.altinity.com/v1"
+kind: "ClickHouseInstallation"
+metadata:
+  name: coroot-clickhouse-small
+  namespace: clickhouse
+spec:
+  # Configuration for the small cluster
+  configuration:
+    # Cluster definition: 1 shard, 2 replicas
+    clusters:
+      - name: coroot-cluster
+        layout:
+          shardsCount: 1      # Single shard (no sharding needed for small scale)
+          replicasCount: 2    # 2 replicas for HA
+
+    # ClickHouse Keeper configuration for replication
+    zookeeper:
+      nodes:
+        - host: clickhouse-keeper-0.clickhouse-keeper-headless.clickhouse.svc.cluster.local
+          port: 9181
+        - host: clickhouse-keeper-1.clickhouse-keeper-headless.clickhouse.svc.cluster.local
+          port: 9181
+        - host: clickhouse-keeper-2.clickhouse-keeper-headless.clickhouse.svc.cluster.local
+          port: 9181
+
+    # Users configuration
+    users:
+      # Default user
+      default/password: ""
+      default/networks/ip:
+        - "::/0"
+      default/profile: default
+      default/quota: default
+
+      # Coroot user
+      coroot/password_sha256_hex: "8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92"  # Password: coroot123 (CHANGE THIS!)
+      coroot/networks/ip:
+        - "::/0"
+      coroot/profile: default
+
+    # Profiles configuration
+    profiles:
+      # Default profile
+      default/max_memory_usage: "4000000000"  # 4GB (lower for small deployment)
+      default/max_execution_time: "300"
+      default/max_concurrent_queries_for_user: "50"  # Lower concurrency
+
+      # Anchor profile (for regular node replica)
+      anchor/max_memory_usage: "2000000000"  # 2GB
+      anchor/max_bytes_before_external_group_by: "1000000000"
+      anchor/max_bytes_before_external_sort: "1000000000"
+
+    # Settings
+    settings:
+      # Compression (aggressive for space savings)
+      compression/case/method: zstd
+      compression/case/level: 3
+
+      # Merge settings (throttled for anchor)
+      background_pool_size: 8
+      background_schedule_pool_size: 8
+      background_fetches_pool_size: 4
+      background_move_pool_size: 4
+      background_common_pool_size: 4
+
+      # System tables
+      system_tables_lazy_load: "1"
+
+    # Files - additional configurations
+    files:
+      # Logging configuration
+      config.d/logs.xml: |
+        <clickhouse>
+          <logger>
+            <level>information</level>
+            <log>/var/log/clickhouse-server/clickhouse-server.log</log>
+            <errorlog>/var/log/clickhouse-server/clickhouse-server.err.log</errorlog>
+            <size>50M</size>
+            <count>3</count>
+          </logger>
+        </clickhouse>
+
+      # Storage policy with TTL for anchor
+      config.d/storage.xml: |
+        <clickhouse>
+          <storage_configuration>
+            <disks>
+              <default>
+                <keep_free_space_bytes>5368709120</keep_free_space_bytes>
+              </default>
+            </disks>
+          </storage_configuration>
+        </clickhouse>
+
+  # Defaults for all pods
+  defaults:
+    templates:
+      # Use anchor template by default (will override for worker)
+      podTemplate: anchor-pod-template
+      dataVolumeClaimTemplate: anchor-storage
+      logVolumeClaimTemplate: log-volume
+
+  # Templates
+  templates:
+    # Pod templates
+    podTemplates:
+      # Anchor replica (regular node, minimal resources)
+      - name: anchor-pod-template
+        spec:
+          # Node affinity: MUST be on regular node (NOT spot)
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: cloud.google.com/gke-spot
+                        operator: DoesNotExist  # NOT a spot node
+
+          # Security context
+          securityContext:
+            runAsUser: 101
+            runAsGroup: 101
+            fsGroup: 101
+
+          # Containers
+          containers:
+            - name: clickhouse
+              image: clickhouse/clickhouse-server:24.11
+              imagePullPolicy: IfNotPresent
+
+              # Minimal resources for regular node
+              resources:
+                requests:
+                  cpu: 500m
+                  memory: 2Gi
+                limits:
+                  cpu: 1000m
+                  memory: 4Gi
+
+              # Volume mounts
+              volumeMounts:
+                - name: data-volume
+                  mountPath: /var/lib/clickhouse
+                - name: log-volume
+                  mountPath: /var/log/clickhouse-server
+
+              # Health checks
+              livenessProbe:
+                httpGet:
+                  path: /ping
+                  port: 8123
+                initialDelaySeconds: 30
+                periodSeconds: 10
+                timeoutSeconds: 5
+                failureThreshold: 3
+
+              readinessProbe:
+                httpGet:
+                  path: /ping
+                  port: 8123
+                initialDelaySeconds: 10
+                periodSeconds: 5
+                timeoutSeconds: 3
+                failureThreshold: 3
+
+      # Worker replica (spot node, use most resources)
+      - name: worker-pod-template
+        spec:
+          # Node affinity: MUST be on spot node
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: cloud.google.com/gke-spot
+                        operator: Exists  # MUST be spot node
+
+          # Security context
+          securityContext:
+            runAsUser: 101
+            runAsGroup: 101
+            fsGroup: 101
+
+          # Containers
+          containers:
+            - name: clickhouse
+              image: clickhouse/clickhouse-server:24.11
+              imagePullPolicy: IfNotPresent
+
+              # Larger resources for spot node
+              resources:
+                requests:
+                  cpu: 4000m
+                  memory: 16Gi
+                limits:
+                  cpu: 8000m
+                  memory: 32Gi
+
+              # Volume mounts
+              volumeMounts:
+                - name: data-volume
+                  mountPath: /var/lib/clickhouse
+                - name: log-volume
+                  mountPath: /var/log/clickhouse-server
+
+              # Health checks
+              livenessProbe:
+                httpGet:
+                  path: /ping
+                  port: 8123
+                initialDelaySeconds: 30
+                periodSeconds: 10
+                timeoutSeconds: 5
+                failureThreshold: 3
+
+              readinessProbe:
+                httpGet:
+                  path: /ping
+                  port: 8123
+                initialDelaySeconds: 10
+                periodSeconds: 5
+                timeoutSeconds: 3
+                failureThreshold: 3
+
+              # Graceful shutdown for spot preemption
+              lifecycle:
+                preStop:
+                  exec:
+                    command:
+                      - /bin/sh
+                      - -c
+                      - kill -TERM 1 && sleep 25
+
+          # Termination grace period for spot preemption
+          terminationGracePeriodSeconds: 30
+
+    # Volume claim templates
+    volumeClaimTemplates:
+      # Anchor storage (small, hot data only)
+      - name: anchor-storage
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 50Gi
+          storageClassName: pd-ssd  # Fast SSD for hot data
+
+      # Worker storage (large, all data)
+      - name: worker-storage
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 500Gi
+          storageClassName: pd-balanced  # Balanced for cost
+
+      # Log storage (small, all nodes)
+      - name: log-volume
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 5Gi
+          storageClassName: standard-rwo
+
+  # Override settings per replica
+  # Replica 0 = Anchor (regular node)
+  # Replica 1 = Worker (spot node)
+  layout:
+    shards:
+      - name: "0"
+        replicas:
+          - name: "0"  # Anchor
+            templates:
+              podTemplate: anchor-pod-template
+              dataVolumeClaimTemplate: anchor-storage
+          - name: "1"  # Worker
+            templates:
+              podTemplate: worker-pod-template
+              dataVolumeClaimTemplate: worker-storage
