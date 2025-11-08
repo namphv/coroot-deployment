@@ -74,7 +74,7 @@ The deployment consists of:
 
 - **ClickHouse Cluster**: Logs, traces, and profiling data
   - 2 shards with 2 replicas each
-  - ZooKeeper for coordination
+  - ClickHouse Keeper for coordination
 
 - **Coroot**: Observability platform
   - Coroot server (2 replicas)
@@ -177,7 +177,7 @@ vmstorage-...-2             1/1     Running   0          2m
 ### Step 5: Install ClickHouse
 
 ```bash
-# Install ClickHouse Operator, ZooKeeper, and ClickHouse Cluster
+# Install ClickHouse Operator, ClickHouse Keeper, and ClickHouse Cluster
 ./install-clickhouse.sh
 
 # Wait for all pods to be ready (may take 5-10 minutes)
@@ -190,9 +190,9 @@ kubectl get chi -n clickhouse
 Expected output:
 ```
 NAME                        READY   STATUS    RESTARTS   AGE
-zookeeper-0                 1/1     Running   0          5m
-zookeeper-1                 1/1     Running   0          5m
-zookeeper-2                 1/1     Running   0          5m
+clickhouse-keeper-0         1/1     Running   0          5m
+clickhouse-keeper-1         1/1     Running   0          5m
+clickhouse-keeper-2         1/1     Running   0          5m
 chi-coroot-...-0-0-0        1/1     Running   0          3m
 chi-coroot-...-0-1-0        1/1     Running   0          3m
 chi-coroot-...-1-0-0        1/1     Running   0          3m

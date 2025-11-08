@@ -1,0 +1,255 @@
+---
+# Service for ClickHouse Keeper headless
+apiVersion: v1
+kind: Service
+metadata:
+  name: clickhouse-keeper-headless
+  namespace: clickhouse
+  labels:
+    app: clickhouse-keeper
+spec:
+  clusterIP: None
+  ports:
+    - port: 9181
+      name: client
+    - port: 9234
+      name: raft
+  selector:
+    app: clickhouse-keeper
+
+---
+# Service for ClickHouse Keeper client
+apiVersion: v1
+kind: Service
+metadata:
+  name: clickhouse-keeper
+  namespace: clickhouse
+  labels:
+    app: clickhouse-keeper
+spec:
+  type: ClusterIP
+  ports:
+    - port: 9181
+      name: client
+  selector:
+    app: clickhouse-keeper
+
+---
+# ConfigMap for ClickHouse Keeper configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: clickhouse-keeper-config
+  namespace: clickhouse
+data:
+  keeper_config.xml: |
+    <clickhouse>
+        <logger>
+            <level>information</level>
+            <console>true</console>
+        </logger>
+
+        <listen_host>0.0.0.0</listen_host>
+        <keeper_server>
+            <tcp_port>9181</tcp_port>
+            <server_id from_env="KEEPER_SERVER_ID"/>
+
+            <log_storage_path>/var/lib/clickhouse/coordination/log</log_storage_path>
+            <snapshot_storage_path>/var/lib/clickhouse/coordination/snapshots</snapshot_storage_path>
+
+            <coordination_settings>
+                <operation_timeout_ms>10000</operation_timeout_ms>
+                <session_timeout_ms>30000</session_timeout_ms>
+                <raft_logs_level>information</raft_logs_level>
+                <rotate_log_storage_interval>10000</rotate_log_storage_interval>
+                <snapshots_to_keep>5</snapshots_to_keep>
+                <shutdown_timeout>5000</shutdown_timeout>
+                <startup_timeout>30000</startup_timeout>
+            </coordination_settings>
+
+            <raft_configuration>
+                <server>
+                    <id>1</id>
+                    <hostname>clickhouse-keeper-0.clickhouse-keeper-headless.clickhouse.svc.cluster.local</hostname>
+                    <port>9234</port>
+                </server>
+                <server>
+                    <id>2</id>
+                    <hostname>clickhouse-keeper-1.clickhouse-keeper-headless.clickhouse.svc.cluster.local</hostname>
+                    <port>9234</port>
+                </server>
+                <server>
+                    <id>3</id>
+                    <hostname>clickhouse-keeper-2.clickhouse-keeper-headless.clickhouse.svc.cluster.local</hostname>
+                    <port>9234</port>
+                </server>
+            </raft_configuration>
+        </keeper_server>
+    </clickhouse>
+
+---
+# StatefulSet for ClickHouse Keeper
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: clickhouse-keeper
+  namespace: clickhouse
+  labels:
+    app: clickhouse-keeper
+spec:
+  serviceName: clickhouse-keeper-headless
+  replicas: 3
+  selector:
+    matchLabels:
+      app: clickhouse-keeper
+
+  podManagementPolicy: Parallel
+
+  template:
+    metadata:
+      labels:
+        app: clickhouse-keeper
+    spec:
+      # Anti-affinity to spread across nodes
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - clickhouse-keeper
+              topologyKey: kubernetes.io/hostname
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: node-type
+                    operator: In
+                    values:
+                      - storage
+                      - monitoring
+
+      tolerations:
+        - key: storage
+          operator: Equal
+          value: critical
+          effect: NoSchedule
+        - key: monitoring
+          operator: Equal
+          value: critical
+          effect: NoSchedule
+
+      initContainers:
+        - name: init-keeper
+          image: busybox:latest
+          command:
+            - sh
+            - -c
+            - |
+              # Extract server ID from hostname (clickhouse-keeper-0 -> 1, clickhouse-keeper-1 -> 2, etc.)
+              HOSTNAME=$(hostname)
+              SERVER_ID=$((${HOSTNAME##*-} + 1))
+              echo "export KEEPER_SERVER_ID=$SERVER_ID" > /tmp/keeper-env
+
+              # Create directories
+              mkdir -p /var/lib/clickhouse/coordination/log
+              mkdir -p /var/lib/clickhouse/coordination/snapshots
+              chown -R 101:101 /var/lib/clickhouse
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/clickhouse
+          securityContext:
+            runAsUser: 0
+
+      containers:
+        - name: clickhouse-keeper
+          image: clickhouse/clickhouse-keeper:latest
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - containerPort: 9181
+              name: client
+            - containerPort: 9234
+              name: raft
+
+          env:
+            - name: KEEPER_SERVER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+
+          command:
+            - bash
+            - -c
+            - |
+              # Extract server ID from pod name
+              SERVER_ID=$((${POD_NAME##*-} + 1))
+              export KEEPER_SERVER_ID=$SERVER_ID
+
+              echo "Starting ClickHouse Keeper with server ID: $SERVER_ID"
+
+              # Start ClickHouse Keeper
+              exec clickhouse-keeper --config-file=/etc/clickhouse-keeper/keeper_config.xml
+
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/clickhouse
+            - name: config
+              mountPath: /etc/clickhouse-keeper
+
+          livenessProbe:
+            tcpSocket:
+              port: 9181
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          readinessProbe:
+            exec:
+              command:
+                - bash
+                - -c
+                - |
+                  # Check if keeper is responding
+                  echo "ruok" | nc localhost 9181 | grep -q "imok"
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          securityContext:
+            runAsUser: 101
+            runAsGroup: 101
+            runAsNonRoot: true
+
+      volumes:
+        - name: config
+          configMap:
+            name: clickhouse-keeper-config
+
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: standard-rwo
+        resources:
+          requests:
+            storage: 10Gi

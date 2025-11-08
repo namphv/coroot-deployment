@@ -13,15 +13,15 @@ spec:
           shardsCount: 2
           replicasCount: 2
 
-    # ZooKeeper configuration for replication
+    # ClickHouse Keeper configuration for replication
     zookeeper:
       nodes:
-        - host: zookeeper-0.zookeeper-headless.clickhouse.svc.cluster.local
-          port: 2181
-        - host: zookeeper-1.zookeeper-headless.clickhouse.svc.cluster.local
-          port: 2181
-        - host: zookeeper-2.zookeeper-headless.clickhouse.svc.cluster.local
-          port: 2181
+        - host: clickhouse-keeper-0.clickhouse-keeper-headless.clickhouse.svc.cluster.local
+          port: 9181
+        - host: clickhouse-keeper-1.clickhouse-keeper-headless.clickhouse.svc.cluster.local
+          port: 9181
+        - host: clickhouse-keeper-2.clickhouse-keeper-headless.clickhouse.svc.cluster.local
+          port: 9181
 
     # Users configuration
     users:

@@ -18,18 +18,18 @@ kubectl wait --for=condition=ready pod \
   -n kube-system \
   --timeout=300s || true
 
-# Deploy ZooKeeper
-echo "Deploying ZooKeeper cluster..."
-kubectl apply -f ../k8s/clickhouse/zookeeper.yaml
+# Deploy ClickHouse Keeper
+echo "Deploying ClickHouse Keeper cluster..."
+kubectl apply -f ../k8s/clickhouse/clickhouse-keeper.yaml
 
-# Wait for ZooKeeper to be ready
-echo "Waiting for ZooKeeper to be ready..."
+# Wait for ClickHouse Keeper to be ready
+echo "Waiting for ClickHouse Keeper to be ready..."
 kubectl wait --for=condition=ready pod \
-  -l app=zookeeper \
+  -l app=clickhouse-keeper \
   -n clickhouse \
   --timeout=300s
 
-echo "Waiting for all ZooKeeper replicas..."
+echo "Waiting for all ClickHouse Keeper replicas..."
 sleep 30
 
 # Deploy ClickHouse cluster

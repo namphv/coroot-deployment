@@ -65,11 +65,11 @@ For observability workloads, ClickHouse on spot nodes is viable because:
 │  ┌─────────────────────────────────────────────────────────┐    │
 │  │  Coordinator Tier (ON-DEMAND NODES)                      │    │
 │  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │    │
-│  │  │  ZooKeeper   │  │  ZooKeeper   │  │  ZooKeeper   │  │    │
-│  │  │      0       │  │      1       │  │      2       │  │    │
+│  │  │  ClickHouse  │  │  ClickHouse  │  │  ClickHouse  │  │    │
+│  │  │   Keeper-0   │  │   Keeper-1   │  │   Keeper-2   │  │    │
 │  │  └──────────────┘  └──────────────┘  └──────────────┘  │    │
 │  │  Purpose: Cluster coordination, metadata                 │    │
-│  │  Cost: ~$50-100/month (small instances)                  │    │
+│  │  Cost: ~$30-50/month (tiny instances)                    │    │
 │  └─────────────────────────────────────────────────────────┘    │
 │                                                                    │
 │  ┌─────────────────────────────────────────────────────────┐    │
@@ -108,22 +108,29 @@ For observability workloads, ClickHouse on spot nodes is viable because:
 
 ### 2.2 Detailed Tier Specifications
 
-#### Coordinator Tier: ZooKeeper (On-Demand)
+#### Coordinator Tier: ClickHouse Keeper (On-Demand)
 
 **Purpose:** Cluster coordination and metadata management
 
 **Configuration:**
 - **Node Count:** 3 replicas
-- **Machine Type:** e2-small (2 vCPU, 2GB RAM) - very lightweight
-- **Storage:** 20GB SSD each
+- **Machine Type:** e2-micro or e2-small (1-2 vCPU, 1-2GB RAM) - extremely lightweight
+- **Storage:** 10GB SSD each
 - **Node Pool:** Regular/on-demand nodes
 - **Availability:** Multi-zone (us-central1-a, b, c)
 
 **Why On-Demand:**
-- Tiny cost impact (~$30-50/month for all 3)
+- Tiny cost impact (~$20-40/month for all 3)
 - Critical for cluster operation
-- Minimal resource requirements
+- Even lighter than ZooKeeper (no JVM overhead)
 - Must be always available
+
+**Why ClickHouse Keeper over ZooKeeper:**
+- Native ClickHouse integration
+- Lower memory footprint (no Java)
+- Better performance
+- Simpler deployment and maintenance
+- Official ClickHouse recommendation
 
 #### Anchor Tier: ClickHouse Stable Replicas (On-Demand)
 
@@ -294,7 +301,7 @@ Normal Operation
     │       │       ├─► 1. Stop accepting new queries (0-2s)
     │       │       ├─► 2. Complete in-flight queries (2-15s)
     │       │       ├─► 3. Flush pending writes (5-10s)
-    │       │       ├─► 4. Sync metadata to ZooKeeper (2-5s)
+    │       │       ├─► 4. Sync metadata to ClickHouse Keeper (2-5s)
     │       │       └─► 5. Shutdown (1-2s)
     │       │
     │       └─► Total: ~25 seconds (within 30s window)
@@ -388,7 +395,7 @@ Query arrives at Distributed Table
 ```
 New Spot Pod Started
     │
-    ├─► 1. Joins cluster (via ZooKeeper)
+    ├─► 1. Joins cluster (via ClickHouse Keeper)
     │       └─► Time: ~30 seconds
     │
     ├─► 2. Identifies missing data
@@ -417,10 +424,10 @@ New Spot Pod Started
 ### 5.1 Node Pool Setup
 
 ```yaml
-# On-Demand Storage Pool (for anchors + ZooKeeper)
+# On-Demand Storage Pool (for anchors + ClickHouse Keeper)
 nodePool:
   name: clickhouse-stable
-  nodeCount: 5  # 3 ZK + 2 anchors
+  nodeCount: 5  # 3 Keeper + 2 anchors
   machineType: n2-standard-8
   diskType: pd-ssd
   diskSize: 200GB
@@ -613,26 +620,26 @@ clickhouse_background_pool_tasks{type="ReplicatedMerge"} > 100
 ```
 Component                    Quantity    Unit Cost    Monthly Cost
 ─────────────────────────────────────────────────────────────────
-ZooKeeper (e2-small)         3 nodes     $15/mo      $45
+ClickHouse Keeper (e2-micro) 3 nodes     $7/mo       $21
 ClickHouse (n2-standard-8)   8 nodes     $250/mo     $2,000
 Storage (pd-ssd, 500GB each) 8 disks     $85/mo      $680
 ─────────────────────────────────────────────────────────────────
-TOTAL                                                 $2,725/mo
+TOTAL                                                 $2,701/mo
 ```
 
 **Hybrid Spot Approach (Proposed):**
 ```
-Component                       Quantity    Unit Cost    Monthly Cost
-───────────────────────────────────────────────────────────────────
-ZooKeeper (e2-small)            3 nodes     $15/mo      $45
-Anchors (n2-standard-8)         2 nodes     $250/mo     $500
-Workers (n2-highmem-8, spot)    6 nodes     $40/mo      $240
-Storage (pd-ssd, 200GB anchors) 2 disks     $34/mo      $68
-Storage (pd-balanced, 1TB workers) 6 disks  $60/mo      $360
-───────────────────────────────────────────────────────────────────
-TOTAL                                                    $1,213/mo
+Component                          Quantity    Unit Cost    Monthly Cost
+──────────────────────────────────────────────────────────────────────
+ClickHouse Keeper (e2-micro)       3 nodes     $7/mo       $21
+Anchors (n2-standard-8)            2 nodes     $250/mo     $500
+Workers (n2-highmem-8, spot)       6 nodes     $40/mo      $240
+Storage (pd-ssd, 200GB anchors)    2 disks     $34/mo      $68
+Storage (pd-balanced, 1TB workers) 6 disks     $60/mo      $360
+──────────────────────────────────────────────────────────────────────
+TOTAL                                                       $1,189/mo
 
-SAVINGS: $1,512/mo (55% reduction)
+SAVINGS: $1,512/mo (56% reduction)
 ```
 
 ### 7.2 Cost Sensitivity Analysis
@@ -650,7 +657,7 @@ SAVINGS: $1,512/mo (55% reduction)
 
 ### Phase 1: Foundation (Week 1)
 - [ ] Create GKE node pools (stable + spot)
-- [ ] Deploy ZooKeeper cluster on stable nodes
+- [ ] Deploy ClickHouse Keeper cluster on stable nodes
 - [ ] Deploy 2 anchor ClickHouse replicas
 
 ### Phase 2: Spot Integration (Week 2)
