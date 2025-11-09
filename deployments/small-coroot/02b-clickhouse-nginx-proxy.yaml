@@ -1,15 +1,14 @@
-# Nginx reverse proxy for intelligent ClickHouse routing
+# Nginx reverse proxy for ClickHouse routing
 #
-# Routing strategy optimized for heavy write workload (observability):
-# - Weighted routing: 90% Worker (strong), 10% Anchor (backup)
-# - No POST/GET distinction (writes are the heavy workload!)
-# - Session affinity ensures client stickiness (no consistency issues)
+# Routing strategy: Maximize spot node usage
+# - ALL traffic → Worker (strong spot node: 1.5+ CPU, 6-15GB RAM)
+# - Anchor = backup ONLY (used only when worker fails/down)
 #
-# Why this works for heavy writes:
-# - Worker handles ~90% of write load (strong: 1.5+ CPU, 6-15GB RAM)
-# - Anchor handles ~10% of write load (weak: 200m CPU, 1GB RAM - manageable)
-# - Same client always hits same replica (session affinity at Service level)
-# - When worker down: 100% traffic to anchor (acceptable temporary slowdown)
+# Why this is optimal:
+# - Maximizes spot node investment (100% utilization when available)
+# - Worker handles all reads + writes (strong node, can handle it)
+# - Anchor only activates during spot preemptions (acceptable slowdown)
+# - Simplest possible routing (primary + backup)
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -27,16 +26,15 @@ data:
       access_log /var/log/nginx/access.log;
       error_log /var/log/nginx/error.log warn;
 
-      # Upstream with weighted routing for ALL traffic (reads + writes)
-      # Note: Service-level session affinity ensures same client → same replica
+      # Upstream: Primary + Backup (maximize spot node usage)
       upstream clickhouse_backend {
-        # Worker (spot node) - 90% of NEW connections (weight=9)
-        # Handles heavy write load from most Coroot instances
-        server chi-coroot-clickhouse-coroot-cluster-0-1-0.coroot.svc.cluster.local:8123 weight=9 max_fails=2 fail_timeout=10s;
+        # Worker (spot node) - PRIMARY (handles 100% of traffic when available)
+        # Strong node: 1.5+ CPU, 6-15GB RAM
+        server chi-coroot-clickhouse-coroot-cluster-0-1-0.coroot.svc.cluster.local:8123 max_fails=2 fail_timeout=10s;
 
-        # Anchor (regular node) - 10% of NEW connections (weight=1)
-        # backup: Only used when worker is down
-        server chi-coroot-clickhouse-coroot-cluster-0-0-0.coroot.svc.cluster.local:8123 weight=1 backup;
+        # Anchor (regular node) - BACKUP (only used when worker fails)
+        # Weak node: 200m CPU, 1GB RAM - acceptable for temporary failover
+        server chi-coroot-clickhouse-coroot-cluster-0-0-0.coroot.svc.cluster.local:8123 backup;
 
         # Connection pooling
         keepalive 32;
@@ -50,7 +48,8 @@ data:
         # Server name
         server_name clickhouse-proxy;
 
-        # ClickHouse HTTP interface - all traffic (reads + writes)
+        # ClickHouse HTTP interface
+        # All traffic → worker (primary), failover to anchor (backup) when worker down
         location / {
           proxy_pass http://clickhouse_backend;
 
