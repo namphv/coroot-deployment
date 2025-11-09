@@ -108,6 +108,68 @@ spec:
           <listen_host>0.0.0.0</listen_host>
         </clickhouse>
 
+      # Tiered storage: Local disk (hot) + GCS (cold)
+      # IMPORTANT: Requires GCS bucket setup and credentials
+      # Uncomment and configure to enable tiered storage
+      # config.d/storage.xml: |
+      #   <clickhouse>
+      #     <storage_configuration>
+      #       <disks>
+      #         <!-- Local disk (hot tier) -->
+      #         <default>
+      #           <type>local</type>
+      #           <path>/var/lib/clickhouse/</path>
+      #         </default>
+      #
+      #         <!-- GCS disk (cold tier) -->
+      #         <gcs>
+      #           <type>s3</type>
+      #           <endpoint>https://storage.googleapis.com/YOUR_BUCKET_NAME/clickhouse/</endpoint>
+      #           <!-- Option 1: Use HMAC keys -->
+      #           <access_key_id>YOUR_GCS_HMAC_ACCESS_KEY</access_key_id>
+      #           <secret_access_key>YOUR_GCS_HMAC_SECRET</secret_access_key>
+      #           <!-- Option 2: Use Workload Identity (remove keys above, add serviceAccount below) -->
+      #           <use_environment_credentials>false</use_environment_credentials>
+      #           <!-- Metadata caching -->
+      #           <cache_enabled>true</cache_enabled>
+      #           <cache_path>/var/lib/clickhouse/disks/gcs_cache/</cache_path>
+      #           <cache_max_size>10Gi</cache_max_size>
+      #         </gcs>
+      #       </disks>
+      #
+      #       <policies>
+      #         <!-- Tiered policy: hot → cold after 7 days -->
+      #         <tiered>
+      #           <volumes>
+      #             <hot>
+      #               <disk>default</disk>
+      #               <!-- Keep recent data (7 days) on local disk -->
+      #             </hot>
+      #             <cold>
+      #               <disk>gcs</disk>
+      #               <!-- Move old data (>7 days) to GCS -->
+      #             </cold>
+      #           </volumes>
+      #           <!-- TTL: move data after 7 days OR when disk 80% full -->
+      #           <move_factor>0.2</move_factor>
+      #         </tiered>
+      #
+      #         <default>
+      #           <volumes>
+      #             <main>
+      #               <disk>default</disk>
+      #             </main>
+      #           </volumes>
+      #         </default>
+      #       </policies>
+      #     </storage_configuration>
+      #
+      #     <!-- Apply tiered storage to all tables -->
+      #     <merge_tree>
+      #       <storage_policy>tiered</storage_policy>
+      #     </merge_tree>
+      #   </clickhouse>
+
   defaults:
     templates:
       podTemplate: anchor-pod-template

@@ -40,11 +40,37 @@ Anchor ←---ClickHouse Keeper---→ Worker
 
 **Why Nginx proxy instead of Kubernetes Service:**
 - ❌ **K8s Service**: Round-robin 50/50 (wastes strong worker node)
-- ✅ **Nginx Proxy**: Weighted 90/10 (maximizes strong worker usage)
-- ✅ **Backup mode**: Anchor marked as `backup` in nginx (only used when worker down)
+- ✅ **Nginx Proxy**: Primary+backup routing (100% worker when up, 0% anchor)
+- ✅ **Backup mode**: Anchor only receives traffic when worker fails
 - ✅ Health checks: Automatic failover when worker unavailable (max_fails=2, fail_timeout=10s)
 - ✅ Writes succeed even during spot node restart (2-5 sec latency)
 - ✅ Session affinity keeps queries on same replica for consistency
+
+## Storage Considerations
+
+**⚠️ Important: Storage Size Mismatch**
+
+Current configuration has a storage mismatch:
+- Anchor: 30GB storage
+- Worker: 500GB storage
+- **Problem**: Replicas should have same capacity, but anchor only has 30GB
+
+**When worker data exceeds 30GB, replication will fail!**
+
+**Solutions:**
+
+1. **Increase anchor storage** to match worker (500GB both)
+   - Cost: $50/month for anchor
+   - Simple but expensive
+
+2. **Reduce both to same size** (e.g., 200GB both)
+   - Cost: $20/month each ($40 total)
+   - Less retention but affordable
+
+3. **Enable tiered storage** (Recommended - see [TIERED_STORAGE_SETUP.md](TIERED_STORAGE_SETUP.md))
+   - Both: 100GB local + GCS cold tier
+   - Cost: $28/month total (saves 47%)
+   - Unlimited retention, auto-tiering after 7 days
 
 ## Prerequisites
 
@@ -76,14 +102,16 @@ kubectl port-forward -n coroot svc/coroot 8080:8080
 
 ```
 deployments/small-coroot/
-├── 00-namespace.yaml             # Namespace definition
-├── 01-clickhouse-keeper.yaml     # ClickHouse Keeper (3 replicas)
-├── 02-clickhouse-cluster.yaml    # ClickHouse (1 shard, 2 replicas)
-├── 02a-clickhouse-service.yaml   # Direct service (optional, for manual testing)
-├── 02b-clickhouse-nginx-proxy.yaml  # Nginx proxy (weighted routing: 90% worker, 10% anchor)
-├── 03-coroot-values.yaml         # Coroot Helm values
-├── deploy.sh                     # One-command deployment
-└── README.md                     # This file
+├── 00-namespace.yaml                # Namespace definition
+├── 01-clickhouse-keeper.yaml        # ClickHouse Keeper (3 replicas)
+├── 02-clickhouse-cluster.yaml       # ClickHouse (1 shard, 2 replicas) + tiered storage config
+├── 02a-clickhouse-service.yaml      # Direct service (optional, for manual testing)
+├── 02b-clickhouse-nginx-proxy.yaml  # Nginx proxy (primary+backup routing)
+├── 02c-clickhouse-tiered-storage.yaml  # Tiered storage reference (deprecated, see 02-clickhouse-cluster.yaml)
+├── 03-coroot-values.yaml            # Coroot Helm values
+├── deploy.sh                        # One-command deployment
+├── README.md                        # This file
+└── TIERED_STORAGE_SETUP.md          # Guide to enable GCS-backed tiered storage
 ```
 
 ## Manual Deployment
