@@ -1,0 +1,188 @@
+# Coroot Helm Values for Small Efficient Deployment
+# All in 'coroot' namespace with ClickHouse metrics storage
+
+# Namespace override
+namespaceOverride: coroot
+
+# Coroot server configuration
+corootCE:
+  replicas: 1  # Single replica for small deployment (can increase to 2 for HA)
+
+  image:
+    repository: ghcr.io/coroot/coroot
+    tag: ""
+    pullPolicy: IfNotPresent
+
+  resources:
+    requests:
+      cpu: 500m
+      memory: 2Gi
+    limits:
+      cpu: 2000m
+      memory: 4Gi
+
+  service:
+    type: ClusterIP  # Change to LoadBalancer if needed
+    port: 8080
+
+  # Place on regular node (not spot)
+  affinity:
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          preference:
+            matchExpressions:
+              - key: cloud.google.com/gke-spot
+                operator: DoesNotExist
+
+  env:
+    # Use ClickHouse for metrics (unified storage)
+    - name: GLOBAL_PROMETHEUS_USE_CLICKHOUSE
+      value: "true"
+
+    # ClickHouse space management (auto-cleanup for spot nodes)
+    - name: CLICKHOUSE_SPACE_MANAGER_ENABLED
+      value: "true"
+    - name: CLICKHOUSE_SPACE_MANAGER_USAGE_THRESHOLD_PERCENT
+      value: "85"
+    - name: CLICKHOUSE_SPACE_MANAGER_MIN_PARTITIONS
+      value: "7"
+
+    # Cache settings
+    - name: CACHE_TTL
+      value: "30m"
+    - name: CACHE_GC_INTERVAL
+      value: "10m"
+
+  persistence:
+    enabled: true
+    size: 20Gi
+    storageClass: standard-rwo
+
+# External ClickHouse (unified storage for metrics + logs + traces)
+externalClickhouse:
+  enabled: true
+  protocol: http
+  host: chi-coroot-clickhouse-coroot-cluster-0-0.coroot.svc.cluster.local
+  port: 8123
+  database: coroot
+  user: coroot
+  password: coroot123  # CHANGE THIS!
+
+# Disable external Prometheus (using ClickHouse)
+externalPrometheus:
+  enabled: false
+
+# Disable embedded components
+prometheus:
+  enabled: false
+
+clickhouse:
+  enabled: false
+
+# PostgreSQL for Coroot metadata
+postgresql:
+  enabled: true
+
+  auth:
+    username: coroot
+    password: coroot-pg-password  # CHANGE THIS!
+    database: coroot
+
+  primary:
+    resources:
+      requests:
+        cpu: 250m
+        memory: 512Mi
+      limits:
+        cpu: 500m
+        memory: 1Gi
+
+    persistence:
+      enabled: true
+      size: 10Gi
+      storageClass: standard-rwo
+
+    # Prefer regular node
+    affinity:
+      nodeAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            preference:
+              matchExpressions:
+                - key: cloud.google.com/gke-spot
+                  operator: DoesNotExist
+
+# Node Agent (DaemonSet on all nodes)
+node-agent:
+  enabled: true
+
+  image:
+    repository: ghcr.io/coroot/coroot-node-agent
+    tag: ""
+
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+
+  # Run on all nodes
+  tolerations:
+    - effect: NoSchedule
+      operator: Exists
+    - effect: NoExecute
+      operator: Exists
+
+  securityContext:
+    privileged: true
+    capabilities:
+      add:
+        - SYS_ADMIN
+        - SYS_RESOURCE
+        - SYS_PTRACE
+        - NET_ADMIN
+        - IPC_LOCK
+
+  env:
+    # Write to Coroot server (which writes to ClickHouse)
+    - name: PROMETHEUS_REMOTE_WRITE_URL
+      value: http://coroot.coroot.svc:8080/api/v1/write
+    - name: SCRAPE_INTERVAL
+      value: "15s"
+    - name: EXTERNAL_LABELS
+      value: "cluster=small-coroot"
+
+# Cluster Agent (Kubernetes metadata)
+cluster-agent:
+  enabled: true
+
+  replicas: 1
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 200m
+      memory: 512Mi
+
+  env:
+    - name: COROOT_URL
+      value: http://coroot.coroot.svc:8080
+    - name: SCRAPE_INTERVAL
+      value: "30s"
+
+# RBAC
+serviceAccount:
+  create: true
+
+rbac:
+  create: true
+
+# Bootstrap
+bootstrap:
+  adminPassword: "admin"  # CHANGE THIS!
+  createDefaultProject: true

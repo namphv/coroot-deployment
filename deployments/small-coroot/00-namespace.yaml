@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: coroot
+  labels:
+    name: coroot
+    purpose: observability
+    deployment-size: small

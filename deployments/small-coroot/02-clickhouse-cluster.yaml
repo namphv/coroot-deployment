@@ -1,0 +1,249 @@
+apiVersion: "clickhouse.altinity.com/v1"
+kind: "ClickHouseInstallation"
+metadata:
+  name: coroot-clickhouse
+  namespace: coroot
+spec:
+  # Small efficient configuration: 1 shard, 2 replicas
+  configuration:
+    clusters:
+      - name: coroot-cluster
+        layout:
+          shardsCount: 1      # Single shard
+          replicasCount: 2    # Anchor (regular) + Worker (spot)
+
+    # ClickHouse Keeper for replication
+    zookeeper:
+      nodes:
+        - host: clickhouse-keeper-0.clickhouse-keeper-headless.coroot.svc.cluster.local
+          port: 9181
+        - host: clickhouse-keeper-1.clickhouse-keeper-headless.coroot.svc.cluster.local
+          port: 9181
+        - host: clickhouse-keeper-2.clickhouse-keeper-headless.coroot.svc.cluster.local
+          port: 9181
+
+    # Users
+    users:
+      default/password: ""
+      default/networks/ip:
+        - "::/0"
+      default/profile: default
+
+      coroot/password_sha256_hex: "8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92"  # coroot123 - CHANGE THIS!
+      coroot/networks/ip:
+        - "::/0"
+      coroot/profile: default
+
+    # Profiles
+    profiles:
+      default/max_memory_usage: "4000000000"
+      default/max_execution_time: "300"
+      default/max_concurrent_queries_for_user: "50"
+
+      anchor/max_memory_usage: "2000000000"
+      anchor/max_bytes_before_external_group_by: "1000000000"
+
+    # Settings
+    settings:
+      compression/case/method: zstd
+      compression/case/level: 3
+      background_pool_size: 8
+      background_schedule_pool_size: 8
+      system_tables_lazy_load: "1"
+
+    files:
+      config.d/logs.xml: |
+        <clickhouse>
+          <logger>
+            <level>information</level>
+            <log>/var/log/clickhouse-server/clickhouse-server.log</log>
+            <errorlog>/var/log/clickhouse-server/clickhouse-server.err.log</errorlog>
+            <size>50M</size>
+            <count>3</count>
+          </logger>
+        </clickhouse>
+
+      # Traffic routing: 80-90% to spot node, 10-20% to regular node
+      config.d/replica_priority.xml: |
+        <clickhouse>
+          <remote_servers>
+            <coroot_cluster>
+              <shard>
+                <internal_replication>true</internal_replication>
+
+                <!-- Worker (spot) - HIGH PRIORITY -->
+                <replica>
+                  <host>chi-coroot-clickhouse-coroot-cluster-0-1-0.coroot.svc.cluster.local</host>
+                  <port>9000</port>
+                  <priority>1</priority>
+                </replica>
+
+                <!-- Anchor (regular) - LOW PRIORITY (fallback) -->
+                <replica>
+                  <host>chi-coroot-clickhouse-coroot-cluster-0-0-0.coroot.svc.cluster.local</host>
+                  <port>9000</port>
+                  <priority>10</priority>
+                </replica>
+              </shard>
+            </coroot_cluster>
+          </remote_servers>
+
+          <profiles>
+            <default>
+              <fallback_to_stale_replicas_for_distributed_queries>1</fallback_to_stale_replicas_for_distributed_queries>
+              <max_replica_delay_for_distributed_queries>300</max_replica_delay_for_distributed_queries>
+              <load_balancing>nearest_hostname</load_balancing>
+              <prefer_localhost_replica>1</prefer_localhost_replica>
+            </default>
+          </profiles>
+        </clickhouse>
+
+  defaults:
+    templates:
+      podTemplate: anchor-pod-template
+      dataVolumeClaimTemplate: anchor-storage
+      logVolumeClaimTemplate: log-volume
+
+  templates:
+    podTemplates:
+      # Anchor replica - regular node, minimal resources
+      - name: anchor-pod-template
+        spec:
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: cloud.google.com/gke-spot
+                        operator: DoesNotExist
+
+          securityContext:
+            runAsUser: 101
+            runAsGroup: 101
+            fsGroup: 101
+
+          containers:
+            - name: clickhouse
+              image: clickhouse/clickhouse-server:24.11
+              resources:
+                requests:
+                  cpu: 500m
+                  memory: 2Gi
+                limits:
+                  cpu: 1000m
+                  memory: 4Gi
+
+              volumeMounts:
+                - name: data-volume
+                  mountPath: /var/lib/clickhouse
+                - name: log-volume
+                  mountPath: /var/log/clickhouse-server
+
+              livenessProbe:
+                httpGet:
+                  path: /ping
+                  port: 8123
+                initialDelaySeconds: 30
+                periodSeconds: 10
+
+              readinessProbe:
+                httpGet:
+                  path: /ping
+                  port: 8123
+                initialDelaySeconds: 10
+                periodSeconds: 5
+
+      # Worker replica - spot node, most resources
+      - name: worker-pod-template
+        spec:
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: cloud.google.com/gke-spot
+                        operator: Exists
+
+          securityContext:
+            runAsUser: 101
+            runAsGroup: 101
+            fsGroup: 101
+
+          containers:
+            - name: clickhouse
+              image: clickhouse/clickhouse-server:24.11
+              resources:
+                requests:
+                  cpu: 4000m
+                  memory: 16Gi
+                limits:
+                  cpu: 8000m
+                  memory: 32Gi
+
+              volumeMounts:
+                - name: data-volume
+                  mountPath: /var/lib/clickhouse
+                - name: log-volume
+                  mountPath: /var/log/clickhouse-server
+
+              livenessProbe:
+                httpGet:
+                  path: /ping
+                  port: 8123
+                initialDelaySeconds: 30
+                periodSeconds: 10
+
+              readinessProbe:
+                httpGet:
+                  path: /ping
+                  port: 8123
+                initialDelaySeconds: 10
+                periodSeconds: 5
+
+              lifecycle:
+                preStop:
+                  exec:
+                    command:
+                      - /bin/sh
+                      - -c
+                      - kill -TERM 1 && sleep 25
+
+          terminationGracePeriodSeconds: 30
+
+    volumeClaimTemplates:
+      - name: anchor-storage
+        spec:
+          accessModes: [ReadWriteOnce]
+          resources:
+            requests:
+              storage: 50Gi
+          storageClassName: pd-ssd
+
+      - name: worker-storage
+        spec:
+          accessModes: [ReadWriteOnce]
+          resources:
+            requests:
+              storage: 500Gi
+          storageClassName: pd-balanced
+
+      - name: log-volume
+        spec:
+          accessModes: [ReadWriteOnce]
+          resources:
+            requests:
+              storage: 5Gi
+          storageClassName: standard-rwo
+
+  layout:
+    shards:
+      - name: "0"
+        replicas:
+          - name: "0"  # Anchor
+            templates:
+              podTemplate: anchor-pod-template
+              dataVolumeClaimTemplate: anchor-storage
+          - name: "1"  # Worker
+            templates:
+              podTemplate: worker-pod-template
+              dataVolumeClaimTemplate: worker-storage
