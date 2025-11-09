@@ -9,8 +9,29 @@ spec:
     clusters:
       - name: coroot-cluster
         layout:
-          shardsCount: 1      # Single shard
-          replicasCount: 2    # Anchor (regular) + Worker (spot)
+          shards:
+            - name: "0"
+              replicas:
+                - name: "0"  # Anchor replica on regular node
+                  templates:
+                    podTemplate: anchor-pod-template
+                    dataVolumeClaimTemplate: anchor-storage
+                    logVolumeClaimTemplate: log-volume
+                  settings:
+                    # Lower resource settings for anchor (mostly idle)
+                    background_pool_size: 8
+                    background_schedule_pool_size: 8
+                    max_concurrent_queries: 50
+                - name: "1"  # Worker replica on spot node
+                  templates:
+                    podTemplate: worker-pod-template
+                    dataVolumeClaimTemplate: worker-storage
+                    logVolumeClaimTemplate: log-volume
+                  settings:
+                    # Higher resource settings for worker (handles most traffic)
+                    background_pool_size: 24
+                    background_schedule_pool_size: 24
+                    max_concurrent_queries: 200
 
     # ClickHouse Keeper for replication
     zookeeper:
@@ -29,7 +50,7 @@ spec:
         - "::/0"
       default/profile: default
 
-      coroot/password_sha256_hex: "8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92"  # coroot123 - CHANGE THIS!
+      coroot/password_sha256_hex: "ab9a68a6f38de96e1c995a43dba9b9d809945194e4461db8c325514d6efb582b"  # coroot123 - CHANGE THIS!
       coroot/networks/ip:
         - "::/0"
       coroot/profile: default
@@ -39,17 +60,27 @@ spec:
       default/max_memory_usage: "4000000000"
       default/max_execution_time: "300"
       default/max_concurrent_queries_for_user: "50"
+      default/max_threads: "4"
 
       anchor/max_memory_usage: "2000000000"
       anchor/max_bytes_before_external_group_by: "1000000000"
+      anchor/max_threads: "2"
 
-    # Settings
+      worker/max_memory_usage: "10000000000"
+      worker/max_execution_time: "300"
+      worker/max_concurrent_queries_for_user: "200"
+      worker/max_threads: "8"
+
+    # Settings (global defaults, can be overridden per replica)
     settings:
       compression/case/method: zstd
       compression/case/level: 3
-      background_pool_size: 8
-      background_schedule_pool_size: 8
+      background_merges_mutations_concurrency_ratio: 2
+      number_of_free_entries_in_pool_to_execute_mutation: 10
       system_tables_lazy_load: "1"
+      # Default pool sizes (overridden per replica)
+      background_pool_size: 16
+      background_schedule_pool_size: 16
 
     files:
       config.d/logs.xml: |
@@ -63,39 +94,18 @@ spec:
           </logger>
         </clickhouse>
 
-      # Traffic routing: 80-90% to spot node, 10-20% to regular node
-      config.d/replica_priority.xml: |
+      config.d/dns_cache.xml: |
         <clickhouse>
-          <remote_servers>
-            <coroot_cluster>
-              <shard>
-                <internal_replication>true</internal_replication>
+          <!-- Set very long DNS cache update period (1 day = 86400 seconds) to minimize DNS lookups -->
+          <dns_cache_update_period>86400</dns_cache_update_period>
+          <!-- Disable internal DNS cache entirely - rely on system DNS cache -->
+          <disable_internal_dns_cache>1</disable_internal_dns_cache>
+        </clickhouse>
 
-                <!-- Worker (spot) - HIGH PRIORITY -->
-                <replica>
-                  <host>chi-coroot-clickhouse-coroot-cluster-0-1-0.coroot.svc.cluster.local</host>
-                  <port>9000</port>
-                  <priority>1</priority>
-                </replica>
-
-                <!-- Anchor (regular) - LOW PRIORITY (fallback) -->
-                <replica>
-                  <host>chi-coroot-clickhouse-coroot-cluster-0-0-0.coroot.svc.cluster.local</host>
-                  <port>9000</port>
-                  <priority>10</priority>
-                </replica>
-              </shard>
-            </coroot_cluster>
-          </remote_servers>
-
-          <profiles>
-            <default>
-              <fallback_to_stale_replicas_for_distributed_queries>1</fallback_to_stale_replicas_for_distributed_queries>
-              <max_replica_delay_for_distributed_queries>300</max_replica_delay_for_distributed_queries>
-              <load_balancing>nearest_hostname</load_balancing>
-              <prefer_localhost_replica>1</prefer_localhost_replica>
-            </default>
-          </profiles>
+      config.d/network.xml: |
+        <clickhouse>
+          <!-- Only listen on IPv4 since cluster doesn't have IPv6 -->
+          <listen_host>0.0.0.0</listen_host>
         </clickhouse>
 
   defaults:
@@ -128,14 +138,13 @@ spec:
               image: clickhouse/clickhouse-server:24.11
               resources:
                 requests:
-                  cpu: 200m       # Minimal for replication + light queries
-                  memory: 1Gi     # Reduced from 2Gi
+                  cpu: 200m
+                  memory: 500Mi
                 limits:
-                  cpu: 500m       # Cap at 500m (sufficient for fallback)
-                  memory: 2Gi     # Reduced from 4Gi
+                  memory: 800Mi
 
               volumeMounts:
-                - name: data-volume
+                - name: anchor-storage
                   mountPath: /var/lib/clickhouse
                 - name: log-volume
                   mountPath: /var/log/clickhouse-server
@@ -165,6 +174,12 @@ spec:
                       - key: cloud.google.com/gke-spot
                         operator: Exists
 
+          tolerations:
+            - effect: NoSchedule
+              key: cloud.google.com/gke-spot
+              operator: Equal
+              value: "true"
+
           securityContext:
             runAsUser: 101
             runAsGroup: 101
@@ -179,10 +194,10 @@ spec:
                   memory: 6Gi     # Guaranteed minimum
                 limits:
                   # No CPU limit - can burst to use spare CPU when Chrome is idle
-                  memory: 15Gi    # Hard cap: Chrome (12Gi) + ClickHouse (15Gi) = 27Gi < 27.6Gi available
+                  memory: 13Gi    # Hard cap: Chrome (12Gi) + ClickHouse (15Gi) = 27Gi < 27.6Gi available
 
               volumeMounts:
-                - name: data-volume
+                - name: worker-storage
                   mountPath: /var/lib/clickhouse
                 - name: log-volume
                   mountPath: /var/log/clickhouse-server
@@ -217,16 +232,16 @@ spec:
           accessModes: [ReadWriteOnce]
           resources:
             requests:
-              storage: 30Gi          # Reduced from 50Gi (small deployment, can expand if needed)
-          storageClassName: pd-balanced  # Cheaper than pd-ssd (anchor mostly idle)
+              storage: 100Gi         # Match worker for full replication
+          storageClassName: standard-rwo  # Cheaper than pd-ssd (anchor mostly idle)
 
       - name: worker-storage
         spec:
           accessModes: [ReadWriteOnce]
           resources:
             requests:
-              storage: 500Gi
-          storageClassName: pd-balanced
+              storage: 100Gi
+          storageClassName: standard-rwo
 
       - name: log-volume
         spec:
@@ -235,16 +250,3 @@ spec:
             requests:
               storage: 5Gi
           storageClassName: standard-rwo
-
-  layout:
-    shards:
-      - name: "0"
-        replicas:
-          - name: "0"  # Anchor
-            templates:
-              podTemplate: anchor-pod-template
-              dataVolumeClaimTemplate: anchor-storage
-          - name: "1"  # Worker
-            templates:
-              podTemplate: worker-pod-template
-              dataVolumeClaimTemplate: worker-storage
