@@ -1,0 +1,42 @@
+# ClickHouse Service for Coroot
+# Strategy: Round-robin across all replicas with automatic failover
+#
+# Why not direct pod connection:
+# - Direct anchor connection bypasses replica_priority.xml
+# - Service provides automatic failover when spot node restarts
+# - Load balances between anchor and worker
+#
+# Trade-offs:
+# - Writes to anchor: Always available, automatically replicated
+# - Writes to worker: Better performance, but downtime during spot preemption
+# - Solution: Accept brief write latency during failover (2-5 seconds)
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clickhouse-coroot
+  namespace: coroot
+  labels:
+    app: clickhouse
+    clickhouse.altinity.com/chi: coroot-clickhouse
+spec:
+  type: ClusterIP
+  sessionAffinity: ClientIP  # Sticky sessions for consistency
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 3600  # 1 hour - keeps same replica for query consistency
+  ports:
+    - name: http
+      port: 8123
+      targetPort: 8123
+      protocol: TCP
+    - name: native
+      port: 9000
+      targetPort: 9000
+      protocol: TCP
+  selector:
+    clickhouse.altinity.com/chi: coroot-clickhouse
+    clickhouse.altinity.com/cluster: coroot-cluster
+    # Matches BOTH anchor and worker replicas
+    # Kubernetes round-robins between available endpoints
+    # When worker is down: automatically routes all traffic to anchor

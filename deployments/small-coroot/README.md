@@ -7,8 +7,9 @@ Complete, self-contained deployment for Coroot with ClickHouse optimized for sma
 **All components in `coroot` namespace:**
 - ClickHouse Keeper (3 replicas, ~450MB total)
 - ClickHouse Cluster (1 shard, 2 replicas)
-  - Anchor: Regular node, 2GB RAM, 30GB pd-balanced (fallback, 10-20% traffic)
-  - Worker: Spot node, 6-15GB RAM, 500GB pd-balanced (80-90% traffic)
+  - Anchor: Regular node, 1GB RAM, 30GB pd-balanced (replication + fallback)
+  - Worker: Spot node, 6-15GB RAM, 500GB pd-balanced (main workload)
+- **Load-Balanced Service**: Round-robins between anchor and worker, auto-failover
 - Coroot Server (unified ClickHouse storage for metrics + logs + traces)
 - Coroot Node Agents (DaemonSet on all nodes)
 - PostgreSQL (Coroot metadata)
@@ -19,6 +20,30 @@ Complete, self-contained deployment for Coroot with ClickHouse optimized for sma
 - ClickHouse limits: No CPU limit (can burst), 15GB RAM (hard cap)
 - Chrome Headless: 3-6 CPU + 3-12GB RAM
 - Total: Fits in 7.9 CPU + 27.6GB available on spot node
+
+## Architecture Highlights
+
+**Write & Read Path:**
+```
+Coroot → clickhouse-coroot Service (load-balanced)
+           ├─ 50%: Anchor (regular node, always available)
+           └─ 50%: Worker (spot node, better performance)
+
+When spot node down:
+Coroot → clickhouse-coroot Service
+           └─ 100%: Anchor (automatic failover)
+
+Data replication (automatic):
+Anchor ←---ClickHouse Keeper---→ Worker
+  (Both replicas have identical data)
+```
+
+**Why this architecture:**
+- ❌ **Old**: Direct connection to anchor bypassed replica_priority.xml
+- ✅ **New**: Service provides round-robin + automatic failover
+- ✅ Writes succeed even during spot node restart (2-5 sec latency)
+- ✅ Reads distributed between both replicas
+- ✅ Session affinity keeps queries on same replica for consistency
 
 ## Prerequisites
 
@@ -50,12 +75,13 @@ kubectl port-forward -n coroot svc/coroot 8080:8080
 
 ```
 deployments/small-coroot/
-├── 00-namespace.yaml           # Namespace definition
-├── 01-clickhouse-keeper.yaml   # ClickHouse Keeper (3 replicas)
-├── 02-clickhouse-cluster.yaml  # ClickHouse (1 shard, 2 replicas)
-├── 03-coroot-values.yaml       # Coroot Helm values
-├── deploy.sh                   # One-command deployment
-└── README.md                   # This file
+├── 00-namespace.yaml            # Namespace definition
+├── 01-clickhouse-keeper.yaml    # ClickHouse Keeper (3 replicas)
+├── 02-clickhouse-cluster.yaml   # ClickHouse (1 shard, 2 replicas)
+├── 02a-clickhouse-service.yaml  # Load-balanced service (round-robin + failover)
+├── 03-coroot-values.yaml        # Coroot Helm values
+├── deploy.sh                    # One-command deployment
+└── README.md                    # This file
 ```
 
 ## Manual Deployment

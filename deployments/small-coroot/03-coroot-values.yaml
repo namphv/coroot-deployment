@@ -60,10 +60,11 @@ corootCE:
     storageClass: standard-rwo
 
 # External ClickHouse (unified storage for metrics + logs + traces)
+# Uses load-balanced service (round-robins between anchor and worker)
 externalClickhouse:
   enabled: true
   protocol: http
-  host: chi-coroot-clickhouse-coroot-cluster-0-0.coroot.svc.cluster.local
+  host: clickhouse-coroot.coroot.svc.cluster.local  # Service (not direct pod)
   port: 8123
   database: coroot
   user: coroot
