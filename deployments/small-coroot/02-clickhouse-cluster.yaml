@@ -216,8 +216,8 @@ spec:
           accessModes: [ReadWriteOnce]
           resources:
             requests:
-              storage: 50Gi
-          storageClassName: pd-ssd
+              storage: 30Gi          # Reduced from 50Gi (small deployment, can expand if needed)
+          storageClassName: pd-balanced  # Cheaper than pd-ssd (anchor mostly idle)
 
       - name: worker-storage
         spec:

@@ -7,8 +7,8 @@ Complete, self-contained deployment for Coroot with ClickHouse optimized for sma
 **All components in `coroot` namespace:**
 - ClickHouse Keeper (3 replicas, ~450MB total)
 - ClickHouse Cluster (1 shard, 2 replicas)
-  - Anchor: Regular node, 2GB RAM, 50GB storage (fallback)
-  - Worker: Spot node, 6-15GB RAM, 500GB storage (80-90% traffic)
+  - Anchor: Regular node, 2GB RAM, 30GB pd-balanced (fallback, 10-20% traffic)
+  - Worker: Spot node, 6-15GB RAM, 500GB pd-balanced (80-90% traffic)
 - Coroot Server (unified ClickHouse storage for metrics + logs + traces)
 - Coroot Node Agents (DaemonSet on all nodes)
 - PostgreSQL (Coroot metadata)
