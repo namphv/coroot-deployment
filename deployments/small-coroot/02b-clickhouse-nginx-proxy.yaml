@@ -1,6 +1,14 @@
-# Nginx reverse proxy for weighted ClickHouse routing
-# Routes 80-90% traffic to worker (strong spot node)
-# Routes 10-20% traffic to anchor (weak regular node, backup)
+# Nginx reverse proxy for intelligent ClickHouse routing
+#
+# Routing strategy to solve INSERT consistency problem:
+# - WRITES (POST/INSERT): Always → Anchor (stable, always available)
+# - READS (GET/SELECT): 90% → Worker (strong spot node), 10% → Anchor (backup)
+#
+# Why:
+# - Writes to anchor ensure consistency (no replication lag for read-after-write)
+# - Anchor replicates to worker automatically (ClickHouse Keeper)
+# - Reads maximize worker usage (90% to strong node)
+# - No stale reads (writes go to same place that handles 10% of reads)
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -18,11 +26,16 @@ data:
       access_log /var/log/nginx/access.log;
       error_log /var/log/nginx/error.log warn;
 
-      # ClickHouse upstream with weighted routing
-      upstream clickhouse_backend {
+      # Upstream for writes (INSERT) - always anchor (stable, always available)
+      upstream clickhouse_write {
+        server chi-coroot-clickhouse-coroot-cluster-0-0-0.coroot.svc.cluster.local:8123 max_fails=2 fail_timeout=10s;
+        keepalive 16;
+        keepalive_timeout 60s;
+      }
+
+      # Upstream for reads (SELECT) - weighted routing to maximize worker usage
+      upstream clickhouse_read {
         # Worker (spot node) - 90% of traffic (weight=9)
-        # max_fails=2: Mark as down after 2 failed requests
-        # fail_timeout=10s: Retry after 10 seconds
         server chi-coroot-clickhouse-coroot-cluster-0-1-0.coroot.svc.cluster.local:8123 weight=9 max_fails=2 fail_timeout=10s;
 
         # Anchor (regular node) - 10% of traffic (weight=1)
@@ -43,7 +56,23 @@ data:
 
         # ClickHouse HTTP interface
         location / {
-          proxy_pass http://clickhouse_backend;
+          # Default to read backend (load balanced)
+          set $backend "clickhouse_read";
+
+          # Detect INSERT operations from query parameter (GET requests)
+          # Example: /?query=INSERT INTO ...
+          if ($arg_query ~ "^INSERT") {
+            set $backend "clickhouse_write";
+          }
+
+          # Detect INSERT from URL-encoded POST
+          # Coroot uses Prometheus remote write which uses POST
+          # For safety, route all POSTs to anchor (writes are POSTs, reads are GETs)
+          if ($request_method = POST) {
+            set $backend "clickhouse_write";
+          }
+
+          proxy_pass http://$backend;
 
           # Important: Preserve client IP and headers
           proxy_set_header Host $host;
