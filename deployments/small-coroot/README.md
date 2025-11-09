@@ -8,17 +8,25 @@ Complete, self-contained deployment for Coroot with ClickHouse optimized for sma
 - ClickHouse Keeper (3 replicas, ~450MB total)
 - ClickHouse Cluster (1 shard, 2 replicas)
   - Anchor: Regular node, 2GB RAM, 50GB storage (fallback)
-  - Worker: Spot node, 16-32GB RAM, 500GB storage (80-90% traffic)
+  - Worker: Spot node, 6-15GB RAM, 500GB storage (80-90% traffic)
 - Coroot Server (unified ClickHouse storage for metrics + logs + traces)
 - Coroot Node Agents (DaemonSet on all nodes)
 - PostgreSQL (Coroot metadata)
+
+**Resource Sharing on Spot Node:**
+- ClickHouse Worker configured to coexist with Chrome Headless deployment
+- ClickHouse requests: 1.5 CPU + 6GB RAM (guaranteed minimum)
+- ClickHouse limits: No CPU limit (can burst), 15GB RAM (hard cap)
+- Chrome Headless: 3-6 CPU + 3-12GB RAM
+- Total: Fits in 7.9 CPU + 27.6GB available on spot node
 
 ## Prerequisites
 
 - Kubernetes cluster with:
   - 2 regular nodes (n2-standard-4 or similar)
-  - 1 spot node (n2-highmem-16 or similar)
+  - 1 spot node (7.9 CPU, 27.6GB RAM - e.g., n2-highmem-8 or similar)
   - Spot nodes labeled with `cloud.google.com/gke-spot=true`
+  - **Note:** Spot node shared with Chrome Headless (Chrome has priority)
 - kubectl configured
 - Helm 3.10+
 
@@ -119,27 +127,58 @@ postgresql:
     password: your-secure-pg-password
 ```
 
+### Resource Behavior
+
+**Spot Node Sharing (ClickHouse Worker + Chrome Headless):**
+
+```
+Scheduling (Kubernetes guarantees):
+├─ Chrome requests:      3 CPU + 3 GB
+├─ ClickHouse requests:  1.5 CPU + 6 GB
+└─ Sum:                  4.5 CPU + 9 GB  ✅ Can schedule
+
+Runtime Behavior:
+├─ When Chrome is idle (1.5 CPU + 2 GB):
+│   └─ ClickHouse can burst to ~6 CPU (no CPU limit)
+│
+├─ When Chrome peaks (6 CPU + 5 GB):
+│   ├─ ClickHouse throttled to ~1.5-2 CPU (guaranteed minimum)
+│   └─ Memory: 5 GB + 6-15 GB = 11-20 GB (safe)
+│
+└─ Max memory usage:
+    └─ Chrome (12 GB limit) + ClickHouse (15 GB limit) = 27 GB < 27.6 GB ✅
+```
+
+**Why no CPU limit on ClickHouse?**
+- CPU is compressible (Kubernetes can throttle without killing pods)
+- ClickHouse bursts to use spare CPU when Chrome is idle
+- Natural resource sharing based on actual demand
+- Better performance for observability queries
+
 ### Adjust Resources
 
-**For smaller regular nodes:**
+**If spot node has MORE resources available:**
+```yaml
+# In 02-clickhouse-cluster.yaml, worker template:
+resources:
+  requests:
+    cpu: 2000m       # Increase guaranteed CPU
+    memory: 8Gi      # Increase guaranteed memory
+  limits:
+    # cpu: no limit  # Keep unlimited for bursting
+    memory: 20Gi     # Increase limit (ensure Chrome + ClickHouse < node capacity)
+```
+
+**If regular nodes are very constrained:**
 ```yaml
 # In 02-clickhouse-cluster.yaml, anchor template:
 resources:
   requests:
     cpu: 300m        # Reduce from 500m
     memory: 1.5Gi    # Reduce from 2Gi
-```
-
-**For larger spot node:**
-```yaml
-# In 02-clickhouse-cluster.yaml, worker template:
-resources:
-  requests:
-    cpu: 8000m       # Increase from 4000m
-    memory: 64Gi     # Increase from 16Gi
   limits:
-    cpu: 16000m      # Increase from 8000m
-    memory: 96Gi     # Increase from 32Gi
+    cpu: 500m
+    memory: 3Gi
 ```
 
 ### Enable LoadBalancer
