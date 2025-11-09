@@ -9,7 +9,7 @@ Complete, self-contained deployment for Coroot with ClickHouse optimized for sma
 - ClickHouse Cluster (1 shard, 2 replicas)
   - Anchor: Regular node, 1GB RAM, 30GB pd-balanced (replication + fallback)
   - Worker: Spot node, 6-15GB RAM, 500GB pd-balanced (main workload)
-- **Load-Balanced Service**: Round-robins between anchor and worker, auto-failover
+- **Nginx Proxy** (2 replicas): Weighted routing (90% worker, 10% anchor) + auto-failover
 - Coroot Server (unified ClickHouse storage for metrics + logs + traces)
 - Coroot Node Agents (DaemonSet on all nodes)
 - PostgreSQL (Coroot metadata)
@@ -25,24 +25,25 @@ Complete, self-contained deployment for Coroot with ClickHouse optimized for sma
 
 **Write & Read Path:**
 ```
-Coroot → clickhouse-coroot Service (load-balanced)
-           ├─ 50%: Anchor (regular node, always available)
-           └─ 50%: Worker (spot node, better performance)
+Coroot → Nginx Proxy (weighted routing)
+           ├─ 90%: Worker (spot node, strong: 1.5+ CPU, 6-15GB RAM) ⚡
+           └─ 10%: Anchor (regular node, weak: 200m CPU, 1GB RAM, backup only) 💤
 
 When spot node down:
-Coroot → clickhouse-coroot Service
-           └─ 100%: Anchor (automatic failover)
+Coroot → Nginx Proxy (automatic failover)
+           └─ 100%: Anchor (fallback mode)
 
 Data replication (automatic):
 Anchor ←---ClickHouse Keeper---→ Worker
   (Both replicas have identical data)
 ```
 
-**Why this architecture:**
-- ❌ **Old**: Direct connection to anchor bypassed replica_priority.xml
-- ✅ **New**: Service provides round-robin + automatic failover
+**Why Nginx proxy instead of Kubernetes Service:**
+- ❌ **K8s Service**: Round-robin 50/50 (wastes strong worker node)
+- ✅ **Nginx Proxy**: Weighted 90/10 (maximizes strong worker usage)
+- ✅ **Backup mode**: Anchor marked as `backup` in nginx (only used when worker down)
+- ✅ Health checks: Automatic failover when worker unavailable (max_fails=2, fail_timeout=10s)
 - ✅ Writes succeed even during spot node restart (2-5 sec latency)
-- ✅ Reads distributed between both replicas
 - ✅ Session affinity keeps queries on same replica for consistency
 
 ## Prerequisites
@@ -75,13 +76,14 @@ kubectl port-forward -n coroot svc/coroot 8080:8080
 
 ```
 deployments/small-coroot/
-├── 00-namespace.yaml            # Namespace definition
-├── 01-clickhouse-keeper.yaml    # ClickHouse Keeper (3 replicas)
-├── 02-clickhouse-cluster.yaml   # ClickHouse (1 shard, 2 replicas)
-├── 02a-clickhouse-service.yaml  # Load-balanced service (round-robin + failover)
-├── 03-coroot-values.yaml        # Coroot Helm values
-├── deploy.sh                    # One-command deployment
-└── README.md                    # This file
+├── 00-namespace.yaml             # Namespace definition
+├── 01-clickhouse-keeper.yaml     # ClickHouse Keeper (3 replicas)
+├── 02-clickhouse-cluster.yaml    # ClickHouse (1 shard, 2 replicas)
+├── 02a-clickhouse-service.yaml   # Direct service (optional, for manual testing)
+├── 02b-clickhouse-nginx-proxy.yaml  # Nginx proxy (weighted routing: 90% worker, 10% anchor)
+├── 03-coroot-values.yaml         # Coroot Helm values
+├── deploy.sh                     # One-command deployment
+└── README.md                     # This file
 ```
 
 ## Manual Deployment

@@ -14,9 +14,9 @@ echo "  - ClickHouse Keeper (3 replicas, ~450MB)"
 echo "  - ClickHouse Cluster (1 shard, 2 replicas)"
 echo "    * Anchor (regular node): 1GB RAM, 30GB (fallback)"
 echo "    * Worker (spot node): 6-15GB RAM, 500GB (main)"
+echo "  - Nginx Proxy (weighted routing: 90% worker, 10% anchor)"
 echo "  - Coroot Server (unified ClickHouse storage)"
 echo "  - Coroot Node Agents (DaemonSet)"
-echo "  - Load-balanced service (round-robin with auto-failover)"
 echo ""
 read -p "Continue? (y/n) " -n 1 -r
 echo
@@ -54,7 +54,7 @@ kubectl wait --for=condition=ready pod \
 sleep 15
 
 echo ""
-echo "Step 4/6: Deploying ClickHouse Cluster (1 shard, 2 replicas)..."
+echo "Step 4/7: Deploying ClickHouse Cluster (1 shard, 2 replicas)..."
 kubectl apply -f "$SCRIPT_DIR/02-clickhouse-cluster.yaml"
 kubectl apply -f "$SCRIPT_DIR/02a-clickhouse-service.yaml"
 
@@ -66,12 +66,22 @@ kubectl wait --for=condition=ready pod \
   --timeout=600s || echo "Note: Some ClickHouse pods may still be initializing"
 
 echo ""
-echo "Step 5/6: Adding Coroot Helm repository..."
+echo "Step 5/7: Deploying Nginx Proxy (weighted routing: 90% worker, 10% anchor)..."
+kubectl apply -f "$SCRIPT_DIR/02b-clickhouse-nginx-proxy.yaml"
+
+echo "Waiting for Nginx proxy..."
+kubectl wait --for=condition=ready pod \
+  -l app=clickhouse-nginx-proxy \
+  -n coroot \
+  --timeout=120s || echo "Note: Nginx proxy may still be starting"
+
+echo ""
+echo "Step 6/7: Adding Coroot Helm repository..."
 helm repo add coroot https://coroot.github.io/helm-charts
 helm repo update
 
 echo ""
-echo "Step 6/6: Installing Coroot with ClickHouse metrics..."
+echo "Step 7/7: Installing Coroot with ClickHouse metrics..."
 helm upgrade --install coroot coroot/coroot \
   --namespace coroot \
   --values "$SCRIPT_DIR/03-coroot-values.yaml" \
@@ -137,9 +147,10 @@ echo "  Total: ~1.3GB"
 echo ""
 echo "Regular Node 2:"
 echo "  - ClickHouse Keeper-1 (~128MB)"
+echo "  - Nginx Proxy (2 replicas, ~256MB total)"
 echo "  - Coroot Server (~2GB)"
 echo "  - PostgreSQL (~512MB)"
-echo "  Total: ~2.6GB"
+echo "  Total: ~2.9GB"
 echo ""
 echo "Spot Node (shared with Chrome Headless):"
 echo "  - ClickHouse Keeper-2 (~128MB)"
@@ -148,9 +159,10 @@ echo "  - Chrome Headless (3-12GB, has priority)"
 echo "  Total: ~9-27GB depending on load"
 echo ""
 echo "Traffic Distribution:"
-echo "  - Service round-robins between anchor and worker"
-echo "  - Session affinity keeps queries on same replica"
-echo "  - When spot node down: automatic failover to anchor"
+echo "  - Nginx routes 90% traffic to worker (strong spot node)"
+echo "  - Nginx routes 10% traffic to anchor (backup only)"
+echo "  - When worker down: automatic failover to anchor (100%)"
+echo "  - Maximizes spot node usage while maintaining HA"
 echo ""
 
 echo "=========================================="

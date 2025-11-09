@@ -1,0 +1,178 @@
+# Nginx reverse proxy for weighted ClickHouse routing
+# Routes 80-90% traffic to worker (strong spot node)
+# Routes 10-20% traffic to anchor (weak regular node, backup)
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: clickhouse-nginx-config
+  namespace: coroot
+data:
+  nginx.conf: |
+    events {
+      worker_connections 1024;
+    }
+
+    http {
+      # Logging
+      access_log /var/log/nginx/access.log;
+      error_log /var/log/nginx/error.log warn;
+
+      # ClickHouse upstream with weighted routing
+      upstream clickhouse_backend {
+        # Worker (spot node) - 90% of traffic (weight=9)
+        # max_fails=2: Mark as down after 2 failed requests
+        # fail_timeout=10s: Retry after 10 seconds
+        server chi-coroot-clickhouse-coroot-cluster-0-1-0.coroot.svc.cluster.local:8123 weight=9 max_fails=2 fail_timeout=10s;
+
+        # Anchor (regular node) - 10% of traffic (weight=1)
+        # backup: Only used when worker is down
+        server chi-coroot-clickhouse-coroot-cluster-0-0-0.coroot.svc.cluster.local:8123 weight=1 backup;
+
+        # Health check settings
+        keepalive 32;
+        keepalive_timeout 60s;
+      }
+
+      # HTTP server
+      server {
+        listen 8123;
+
+        # Server name
+        server_name clickhouse-proxy;
+
+        # ClickHouse HTTP interface
+        location / {
+          proxy_pass http://clickhouse_backend;
+
+          # Important: Preserve client IP and headers
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+
+          # ClickHouse-specific headers
+          proxy_set_header X-ClickHouse-User $http_x_clickhouse_user;
+          proxy_set_header X-ClickHouse-Key $http_x_clickhouse_key;
+          proxy_set_header X-ClickHouse-Database $http_x_clickhouse_database;
+
+          # Timeouts for long-running queries
+          proxy_connect_timeout 60s;
+          proxy_send_timeout 300s;
+          proxy_read_timeout 300s;
+
+          # Buffering
+          proxy_buffering off;
+          proxy_request_buffering off;
+
+          # HTTP/1.1 for keepalive
+          proxy_http_version 1.1;
+          proxy_set_header Connection "";
+        }
+
+        # Health check endpoint
+        location /health {
+          access_log off;
+          return 200 "healthy\n";
+          add_header Content-Type text/plain;
+        }
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clickhouse-nginx-proxy
+  namespace: coroot
+  labels:
+    app: clickhouse-nginx-proxy
+spec:
+  replicas: 2  # HA: 2 replicas for reliability
+  selector:
+    matchLabels:
+      app: clickhouse-nginx-proxy
+  template:
+    metadata:
+      labels:
+        app: clickhouse-nginx-proxy
+    spec:
+      # Prefer regular nodes (not spot)
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: cloud.google.com/gke-spot
+                    operator: DoesNotExist
+        # Spread across nodes for HA
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: clickhouse-nginx-proxy
+                topologyKey: kubernetes.io/hostname
+
+      containers:
+        - name: nginx
+          image: nginx:1.25-alpine
+          ports:
+            - containerPort: 8123
+              name: http
+              protocol: TCP
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+              readOnly: true
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8123
+            initialDelaySeconds: 10
+            periodSeconds: 10
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8123
+            initialDelaySeconds: 5
+            periodSeconds: 5
+
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: clickhouse-nginx-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clickhouse-proxy
+  namespace: coroot
+  labels:
+    app: clickhouse-nginx-proxy
+spec:
+  type: ClusterIP
+  sessionAffinity: ClientIP  # Sticky sessions for query consistency
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 3600  # 1 hour
+  ports:
+    - name: http
+      port: 8123
+      targetPort: 8123
+      protocol: TCP
+  selector:
+    app: clickhouse-nginx-proxy

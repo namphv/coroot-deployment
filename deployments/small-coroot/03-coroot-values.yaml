@@ -60,11 +60,11 @@ corootCE:
     storageClass: standard-rwo
 
 # External ClickHouse (unified storage for metrics + logs + traces)
-# Uses load-balanced service (round-robins between anchor and worker)
+# Uses nginx proxy with weighted routing: 90% worker, 10% anchor (backup)
 externalClickhouse:
   enabled: true
   protocol: http
-  host: clickhouse-coroot.coroot.svc.cluster.local  # Service (not direct pod)
+  host: clickhouse-proxy.coroot.svc.cluster.local  # Nginx proxy (weighted routing)
   port: 8123
   database: coroot
   user: coroot
