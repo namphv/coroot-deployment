@@ -1,0 +1,90 @@
+# ClickHouse Tiered Storage Configuration
+# Hot tier: Local disk (recent data, fast queries)
+# Cold tier: GCS (old data, cheap storage)
+#
+# This solves two problems:
+# 1. Storage mismatch: Both replicas can have same small local disk
+# 2. Cost: Old data stored cheaply in GCS instead of expensive pd-balanced
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: clickhouse-tiered-storage-config
+  namespace: coroot
+data:
+  storage.xml: |
+    <clickhouse>
+      <!-- Storage policies for tiered storage -->
+      <storage_configuration>
+
+        <!-- Define disks -->
+        <disks>
+          <!-- Local disk (hot tier) -->
+          <default>
+            <type>local</type>
+            <path>/var/lib/clickhouse/</path>
+          </default>
+
+          <!-- GCS disk (cold tier) -->
+          <!-- Replace YOUR_BUCKET and YOUR_PROJECT -->
+          <gcs>
+            <type>s3</type>
+            <endpoint>https://storage.googleapis.com/YOUR_BUCKET/clickhouse/</endpoint>
+            <access_key_id>YOUR_GCS_ACCESS_KEY</access_key_id>
+            <secret_access_key>YOUR_GCS_SECRET_KEY</secret_access_key>
+            <region>us-central1</region>
+            <use_environment_credentials>true</use_environment_credentials>
+            <!-- Metadata caching -->
+            <cache_enabled>true</cache_enabled>
+            <cache_path>/var/lib/clickhouse/disks/gcs_cache/</cache_path>
+            <cache_max_size>10Gi</cache_max_size>
+          </gcs>
+        </disks>
+
+        <!-- Define storage policies -->
+        <policies>
+          <!-- Tiered policy: hot → cold -->
+          <tiered>
+            <volumes>
+              <!-- Hot volume: Recent data on local disk -->
+              <hot>
+                <disk>default</disk>
+                <!-- Move to cold after 7 days -->
+                <max_data_part_size_bytes>0</max_data_part_size_bytes>
+              </hot>
+
+              <!-- Cold volume: Old data on GCS -->
+              <cold>
+                <disk>gcs</disk>
+              </cold>
+            </volumes>
+
+            <!-- Move data from hot to cold based on conditions -->
+            <move_factor>0.2</move_factor>  <!-- Move when hot disk 80% full -->
+          </tiered>
+
+          <!-- Default policy: local only (for system tables) -->
+          <default>
+            <volumes>
+              <main>
+                <disk>default</disk>
+              </main>
+            </volumes>
+          </default>
+        </policies>
+      </storage_configuration>
+
+      <!-- Apply tiered policy to Coroot tables -->
+      <merge_tree>
+        <storage_policy>tiered</storage_policy>
+      </merge_tree>
+    </clickhouse>
+---
+# ServiceAccount for GCS access (if using workload identity)
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: clickhouse-gcs
+  namespace: coroot
+  annotations:
+    iam.gke.io/gcp-service-account: clickhouse@YOUR_PROJECT.iam.gserviceaccount.com
