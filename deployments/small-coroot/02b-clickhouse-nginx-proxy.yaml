@@ -1,14 +1,15 @@
 # Nginx reverse proxy for intelligent ClickHouse routing
 #
-# Routing strategy to solve INSERT consistency problem:
-# - WRITES (POST/INSERT): Always → Anchor (stable, always available)
-# - READS (GET/SELECT): 90% → Worker (strong spot node), 10% → Anchor (backup)
+# Routing strategy optimized for heavy write workload (observability):
+# - Weighted routing: 90% Worker (strong), 10% Anchor (backup)
+# - No POST/GET distinction (writes are the heavy workload!)
+# - Session affinity ensures client stickiness (no consistency issues)
 #
-# Why:
-# - Writes to anchor ensure consistency (no replication lag for read-after-write)
-# - Anchor replicates to worker automatically (ClickHouse Keeper)
-# - Reads maximize worker usage (90% to strong node)
-# - No stale reads (writes go to same place that handles 10% of reads)
+# Why this works for heavy writes:
+# - Worker handles ~90% of write load (strong: 1.5+ CPU, 6-15GB RAM)
+# - Anchor handles ~10% of write load (weak: 200m CPU, 1GB RAM - manageable)
+# - Same client always hits same replica (session affinity at Service level)
+# - When worker down: 100% traffic to anchor (acceptable temporary slowdown)
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -26,23 +27,18 @@ data:
       access_log /var/log/nginx/access.log;
       error_log /var/log/nginx/error.log warn;
 
-      # Upstream for writes (INSERT) - always anchor (stable, always available)
-      upstream clickhouse_write {
-        server chi-coroot-clickhouse-coroot-cluster-0-0-0.coroot.svc.cluster.local:8123 max_fails=2 fail_timeout=10s;
-        keepalive 16;
-        keepalive_timeout 60s;
-      }
-
-      # Upstream for reads (SELECT) - weighted routing to maximize worker usage
-      upstream clickhouse_read {
-        # Worker (spot node) - 90% of traffic (weight=9)
+      # Upstream with weighted routing for ALL traffic (reads + writes)
+      # Note: Service-level session affinity ensures same client → same replica
+      upstream clickhouse_backend {
+        # Worker (spot node) - 90% of NEW connections (weight=9)
+        # Handles heavy write load from most Coroot instances
         server chi-coroot-clickhouse-coroot-cluster-0-1-0.coroot.svc.cluster.local:8123 weight=9 max_fails=2 fail_timeout=10s;
 
-        # Anchor (regular node) - 10% of traffic (weight=1)
+        # Anchor (regular node) - 10% of NEW connections (weight=1)
         # backup: Only used when worker is down
         server chi-coroot-clickhouse-coroot-cluster-0-0-0.coroot.svc.cluster.local:8123 weight=1 backup;
 
-        # Health check settings
+        # Connection pooling
         keepalive 32;
         keepalive_timeout 60s;
       }
@@ -54,25 +50,9 @@ data:
         # Server name
         server_name clickhouse-proxy;
 
-        # ClickHouse HTTP interface
+        # ClickHouse HTTP interface - all traffic (reads + writes)
         location / {
-          # Default to read backend (load balanced)
-          set $backend "clickhouse_read";
-
-          # Detect INSERT operations from query parameter (GET requests)
-          # Example: /?query=INSERT INTO ...
-          if ($arg_query ~ "^INSERT") {
-            set $backend "clickhouse_write";
-          }
-
-          # Detect INSERT from URL-encoded POST
-          # Coroot uses Prometheus remote write which uses POST
-          # For safety, route all POSTs to anchor (writes are POSTs, reads are GETs)
-          if ($request_method = POST) {
-            set $backend "clickhouse_write";
-          }
-
-          proxy_pass http://$backend;
+          proxy_pass http://clickhouse_backend;
 
           # Important: Preserve client IP and headers
           proxy_set_header Host $host;
